@@ -3,3 +3,4 @@ dist/
 *.ico
 *.spec
 *.json
+*.proj
