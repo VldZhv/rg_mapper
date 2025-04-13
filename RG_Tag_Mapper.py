@@ -1,7 +1,4 @@
-import sys
-import math
-import json
-import base64
+import sys, math, json, base64
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -16,7 +13,7 @@ def fix_negative_zero(val):
     return val
 
 # ---------------------------
-# Классы графических объектов
+# Графические объекты
 # ---------------------------
 
 class HallItem(QGraphicsRectItem):
@@ -37,7 +34,7 @@ class HallItem(QGraphicsRectItem):
         if change == QGraphicsItem.ItemPositionChange:
             new_pos = QPointF(value)
             scene = self.scene()
-            if scene is not None:
+            if scene:
                 rect = self.rect()
                 scene_rect = scene.sceneRect()
                 if new_pos.x() < scene_rect.left():
@@ -65,20 +62,25 @@ class HallItem(QGraphicsRectItem):
         if action == action_edit:
             self.edit_hall()
         elif action == action_delete:
-            mainwin = self.scene().mainwindow
-            self.scene().removeItem(self)
-            if self in mainwin.halls:
-                mainwin.halls.remove(self)
+            self.delete_object()
         event.accept()
 
     def edit_hall(self):
         mainwin = self.scene().mainwindow
-        params = mainwin.get_hall_parameters()
+        params = mainwin.get_hall_parameters_edit(self.number, self.name)
         if params is None:
             return
         num, name = params
         self.number = num
         self.name = name
+
+    def delete_object(self):
+        mainwin = self.scene().mainwindow
+        self.setParentItem(None)
+        self.scene().removeItem(self)
+        if self in mainwin.halls:
+            mainwin.halls.remove(self)
+        # Метод deleteLater() не вызываем, сборщик мусора Python освободит память
 
 class AnchorItem(QGraphicsEllipseItem):
     def __init__(self, x, y, number=0, parent_hall=None):
@@ -103,33 +105,33 @@ class AnchorItem(QGraphicsEllipseItem):
         if action == action_edit:
             self.edit_anchor()
         elif action == action_delete:
-            self.scene().removeItem(self)
+            self.delete_object()
         event.accept()
 
     def edit_anchor(self):
         mainwin = self.scene().mainwindow
-        params = mainwin.get_anchor_parameters()
+        params = mainwin.get_anchor_parameters_edit(self.number, self.z)
         if params is None:
             return
         num, z = params
         self.number = num
         self.z = z
 
+    def delete_object(self):
+        self.setParentItem(None)
+        self.scene().removeItem(self)
+
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange:
             new_pos = QPointF(value)
             scene = self.scene()
-            if scene is not None and self.parentItem() is not None:
+            if scene and self.parentItem():
                 hall = self.parentItem()
                 rect = hall.rect()
-                if new_pos.x() < 0:
-                    new_pos.setX(0)
-                if new_pos.y() < 0:
-                    new_pos.setY(0)
-                if new_pos.x() > rect.width():
-                    new_pos.setX(rect.width())
-                if new_pos.y() > rect.height():
-                    new_pos.setY(rect.height())
+                if new_pos.x() < 0: new_pos.setX(0)
+                if new_pos.y() < 0: new_pos.setY(0)
+                if new_pos.x() > rect.width(): new_pos.setX(rect.width())
+                if new_pos.y() > rect.height(): new_pos.setY(rect.height())
                 step = scene.pixel_per_cm_x * scene.grid_step_cm
                 if step > 0:
                     new_x = round(new_pos.x() / step) * step
@@ -164,9 +166,9 @@ class RectZoneItem(QGraphicsRectItem):
         zones = [item for item in self.scene().items(event.scenePos()) if isinstance(item, RectZoneItem)]
         zones = [z for z in zones if z.contains(z.mapFromScene(event.scenePos()))]
         if zones:
-            smaller = [z for z in zones if z is not self and (z.rect().width() * z.rect().height() < self.rect().width() * self.rect().height())]
+            smaller = [z for z in zones if z is not self and (z.rect().width()*z.rect().height() < self.rect().width()*self.rect().height())]
             if smaller:
-                smallest = min(smaller, key=lambda z: z.rect().width() * z.rect().height())
+                smallest = min(smaller, key=lambda z: z.rect().width()*z.rect().height())
                 smallest.mouseDoubleClickEvent(event)
                 return
         menu = QMenu()
@@ -176,7 +178,7 @@ class RectZoneItem(QGraphicsRectItem):
         if action == action_edit:
             self.edit_zone()
         elif action == action_delete:
-            self.scene().removeItem(self)
+            self.delete_object()
         event.accept()
 
     def edit_zone(self):
@@ -190,9 +192,13 @@ class RectZoneItem(QGraphicsRectItem):
         self.zone_angle = angle
         self.setRotation(angle)
 
+    def delete_object(self):
+        self.setParentItem(None)
+        self.scene().removeItem(self)
+
     def get_export_data(self):
         scene = self.scene()
-        if scene is None or self.parentItem() is None:
+        if scene is None or not self.parentItem():
             return None
         pixel_per_cm = scene.pixel_per_cm_x
         hall = self.parentItem()
@@ -211,17 +217,16 @@ class RectZoneItem(QGraphicsRectItem):
         }
 
 # ---------------------------
-# Класс представления
+# Класс представления (наследник QGraphicsView)
 # ---------------------------
 
 class MyGraphicsView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
-        # После обработки события обновляем состояние выделения в списке
         QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
 
 # ---------------------------
-# Класс кастомной сцены
+# Кастомная сцена
 # ---------------------------
 
 class PlanGraphicsScene(QGraphicsScene):
@@ -276,8 +281,8 @@ class PlanGraphicsScene(QGraphicsScene):
                 else:
                     start = self.mainwindow.temp_start_point
                     end = QPointF(pos)
-                    dx = abs(end.x() - start.x())
-                    dy = abs(end.y() - start.y())
+                    dx = abs(end.x()-start.x())
+                    dy = abs(end.y()-start.y())
                     if dx >= dy:
                         end.setY(start.y())
                     else:
@@ -316,7 +321,7 @@ class PlanGraphicsScene(QGraphicsScene):
                     self.temp_item.setPen(pen)
                     self.temp_item.setBrush(QColor(0, 0, 0, 0))
                     self.addItem(self.temp_item)
-                    self.temp_item.setRect(QRectF(pos, QSizeF(0, 0)))
+                    self.temp_item.setRect(QRectF(pos, QSizeF(0,0)))
                 return
             elif mode == "zone":
                 if self.mainwindow.temp_start_point is None:
@@ -336,7 +341,7 @@ class PlanGraphicsScene(QGraphicsScene):
                     self.temp_item.setPen(pen)
                     self.temp_item.setBrush(QColor(0, 0, 0, 0))
                     self.addItem(self.temp_item)
-                    self.temp_item.setRect(QRectF(pos, QSizeF(0, 0)))
+                    self.temp_item.setRect(QRectF(pos, QSizeF(0,0)))
                 return
             elif mode == "anchor":
                 hall = None
@@ -373,14 +378,10 @@ class PlanGraphicsScene(QGraphicsScene):
                 if mode == "zone" and self.mainwindow.current_hall_for_zone:
                     hall = self.mainwindow.current_hall_for_zone
                     local = hall.mapFromScene(pos)
-                    if local.x() < 0:
-                        local.setX(0)
-                    if local.y() < 0:
-                        local.setY(0)
-                    if local.x() > hall.rect().width():
-                        local.setX(hall.rect().width())
-                    if local.y() > hall.rect().height():
-                        local.setY(hall.rect().height())
+                    if local.x() < 0: local.setX(0)
+                    if local.y() < 0: local.setY(0)
+                    if local.x() > hall.rect().width(): local.setX(hall.rect().width())
+                    if local.y() > hall.rect().height(): local.setY(hall.rect().height())
                     pos = hall.mapToScene(local)
                 if self.temp_item:
                     rect = QRectF(self.mainwindow.temp_start_point, pos).normalized()
@@ -396,26 +397,21 @@ class PlanGraphicsScene(QGraphicsScene):
                 end = event.scenePos()
                 rect = QRectF(start, end).normalized()
                 step = self.pixel_per_cm_x * self.grid_step_cm
-                x0 = rect.left()
-                y0 = rect.top()
-                x1 = rect.right()
-                y1 = rect.bottom()
+                x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
                 if step > 0:
-                    x0 = round(x0 / step) * step
-                    y0 = round(y0 / step) * step
-                    x1 = round(x1 / step) * step
-                    y1 = round(y1 / step) * step
-                if x1 == x0:
-                    x1 = x0 + step
-                if y1 == y0:
-                    y1 = y0 + step
-                w = x1 - x0
-                h = y1 - y0
+                    x0 = round(x0/step)*step
+                    y0 = round(y0/step)*step
+                    x1 = round(x1/step)*step
+                    y1 = round(y1/step)*step
+                if x1 == x0: x1 = x0+step
+                if y1 == y0: y1 = y0+step
+                w, h = x1-x0, y1-y0
                 hall = HallItem(x0, y0, w, h, "", 0)
                 self.addItem(hall)
                 self.mainwindow.halls.append(hall)
                 params = self.mainwindow.get_hall_parameters()
                 if params is None:
+                    hall.setParentItem(None)
                     self.removeItem(hall)
                     self.mainwindow.halls.remove(hall)
                     self.mainwindow.temp_start_point = None
@@ -449,22 +445,16 @@ class PlanGraphicsScene(QGraphicsScene):
                     return
                 rect = QRectF(hall.mapFromScene(start), hall.mapFromScene(end)).normalized()
                 step = self.pixel_per_cm_x * self.grid_step_cm
-                x0 = rect.left()
-                y0 = rect.top()
-                x1 = rect.right()
-                y1 = rect.bottom()
+                x0, y0, x1, y1 = rect.left(), rect.top(), rect.right(), rect.bottom()
                 if step > 0:
-                    x0 = round(x0 / step) * step
-                    y0 = round(y0 / step) * step
-                    x1 = round(x1 / step) * step
-                    y1 = round(y1 / step) * step
-                if x1 == x0:
-                    x1 = x0 + step
-                if y1 == y0:
-                    y1 = y0 + step
+                    x0 = round(x0/step)*step
+                    y0 = round(y0/step)*step
+                    x1 = round(x1/step)*step
+                    y1 = round(y1/step)*step
+                if x1 == x0: x1 = x0+step
+                if y1 == y0: y1 = y0+step
                 bottom_left = QPointF(min(x0, x1), max(y0, y1))
-                w = abs(x1 - x0)
-                h = abs(y1 - y0)
+                w, h = abs(x1-x0), abs(y1-y0)
                 params = self.mainwindow.get_zone_parameters()
                 if params is None:
                     if self.temp_item:
@@ -497,6 +487,10 @@ class PlanGraphicsScene(QGraphicsScene):
                     clicked_item.setSelected(True)
                     self.mainwindow.last_selected_items = [clicked_item]
                     self.mainwindow.on_scene_selection_changed()
+
+# ---------------------------
+# Главное окно
+# ---------------------------
 
 class PlanEditorMainWindow(QMainWindow):
     def __init__(self):
@@ -552,6 +546,46 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.last_selected_items = []
 
+    def get_hall_parameters_edit(self, current_number, current_name):
+        while True:
+            num, ok = QInputDialog.getInt(self, "Номер зала", "Введите номер зала:", current_number, 0, 10000)
+            if not ok:
+                return None
+            if num != current_number and self.hall_number_exists(num):
+                QMessageBox.warning(self, "Ошибка", "Зал с таким номером уже существует!")
+            else:
+                break
+        name, ok = QInputDialog.getText(self, "Название зала (необязательно)", "Введите название зала:", text=current_name)
+        if not ok:
+            return None
+        return num, name
+
+    def get_anchor_parameters_edit(self, current_number, current_z):
+        while True:
+            num, ok = QInputDialog.getInt(self, "Номер якоря", "Введите номер якоря:", current_number, 0, 10000)
+            if not ok:
+                return None
+            if num != current_number and self.anchor_number_exists(num):
+                QMessageBox.warning(self, "Ошибка", "Якорь с таким номером уже существует!")
+            else:
+                break
+        z, ok = QInputDialog.getDouble(self, "Координата Z", "Введите координату Z (см):", current_z, -10000.0, 10000.0, 1)
+        if not ok:
+            return None
+        return num, z
+
+    def on_scene_selection_changed(self):
+        current = self.scene.selectedItems()
+        if current:
+            self.last_selected_items = current
+            for item in current:
+                if hasattr(item, 'tree_item') and item.tree_item is not None:
+                    item.tree_item.setSelected(True)
+        elif self.last_selected_items:
+            for item in self.last_selected_items:
+                if hasattr(item, 'tree_item') and item.tree_item is not None:
+                    item.tree_item.setSelected(True)
+
     def update_tree_selection(self):
         items = [item for item in self.scene.items() if item.isSelected()]
         if items:
@@ -570,10 +604,6 @@ class PlanEditorMainWindow(QMainWindow):
                 if hasattr(item, 'tree_item') and item.tree_item is not None:
                     item.tree_item.setSelected(True)
 
-    def on_scene_selection_changed(self):
-        self.update_tree_selection()
-        QTimer.singleShot(0, self.update_tree_selection)
-
     def handle_wheel_event(self, event):
         factor = 1.2 if event.angleDelta().y() > 0 else 1/1.2
         self.view.scale(factor, factor)
@@ -584,6 +614,7 @@ class PlanEditorMainWindow(QMainWindow):
                 if isinstance(item, HallItem):
                     if item in self.halls:
                         self.halls.remove(item)
+                item.setParentItem(None)
                 self.scene.removeItem(item)
         else:
             super().keyPressEvent(event)
@@ -611,12 +642,20 @@ class PlanEditorMainWindow(QMainWindow):
     def populate_tree(self):
         self.tree.clear()
         for hall in self.halls:
-            room_text = f'Зал {hall.number} "{hall.name}"'
+            w_m = hall.rect().width() / (self.scene.pixel_per_cm_x * 100)
+            h_m = hall.rect().height() / (self.scene.pixel_per_cm_x * 100)
+            if hall.name.strip():
+                room_text = f'Зал {hall.number} "{hall.name}" ({w_m:.1f} x {h_m:.1f} м)'
+            else:
+                room_text = f'Зал {hall.number} ({w_m:.1f} x {h_m:.1f} м)'
             room_text = self.wrap_text(room_text)
             hall_item = QTreeWidgetItem([room_text])
             hall.tree_item = hall_item
             self.tree.addTopLevelItem(hall_item)
             rect = hall.rect()
+            # Группировка зон по номеру
+            zones_group = {}
+            default_zone = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for obj in hall.childItems():
                 if isinstance(obj, AnchorItem):
                     ax = obj.pos().x()
@@ -629,17 +668,23 @@ class PlanEditorMainWindow(QMainWindow):
                     obj.tree_item = anchor_item
                     hall_item.addChild(anchor_item)
                 elif isinstance(obj, RectZoneItem):
+                    num = obj.zone_num
                     data = obj.get_export_data()
-                    zone_text = (f'Зона {obj.zone_num} ({obj.zone_type}):\n'
-                                 f'  x = {data["x"]} м\n'
-                                 f'  y = {data["y"]} м\n'
-                                 f'  w = {data["w"]} м\n'
-                                 f'  h = {data["h"]} м\n'
-                                 f'  angle = {data["angle"]}°')
-                    zone_text = self.wrap_text(zone_text)
-                    zone_item = QTreeWidgetItem([zone_text])
-                    obj.tree_item = zone_item
-                    hall_item.addChild(zone_item)
+                    if num not in zones_group:
+                        zones_group[num] = {"num": num, "enter": default_zone.copy(), "exit": default_zone.copy()}
+                    if obj.zone_type == "Входная зона":
+                        zones_group[num]["enter"] = data
+                    elif obj.zone_type == "Выходная зона":
+                        zones_group[num]["exit"] = data
+            for zone in zones_group.values():
+                zone_text = (f'Зона {zone["num"]}:\n'
+                             f'  enter: x = {zone["enter"]["x"]} м, y = {zone["enter"]["y"]} м, '
+                             f'w = {zone["enter"]["w"]} м, h = {zone["enter"]["h"]} м, angle = {zone["enter"]["angle"]}°\n'
+                             f'  exit:  x = {zone["exit"]["x"]} м, y = {zone["exit"]["y"]} м, '
+                             f'w = {zone["exit"]["w"]} м, h = {zone["exit"]["h"]} м, angle = {zone["exit"]["angle"]}°')
+                zone_text = self.wrap_text(zone_text)
+                zone_item = QTreeWidgetItem([zone_text])
+                hall_item.addChild(zone_item)
             hall_item.setExpanded(True)
 
     def get_hall_parameters(self):
@@ -651,14 +696,9 @@ class PlanEditorMainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Зал с таким номером уже существует!")
             else:
                 break
-        while True:
-            name, ok = QInputDialog.getText(self, "Название зала", "Введите название зала:")
-            if not ok:
-                return self.get_hall_parameters()
-            if name.strip() == "":
-                QMessageBox.warning(self, "Ошибка", "Название зала не может быть пустым!")
-            else:
-                break
+        name, ok = QInputDialog.getText(self, "Название зала (необязательно)", "Введите название зала:")
+        if not ok:
+            return None
         return num, name
 
     def get_anchor_parameters(self):
@@ -670,12 +710,9 @@ class PlanEditorMainWindow(QMainWindow):
                 QMessageBox.warning(self, "Ошибка", "Якорь с таким номером уже существует!")
             else:
                 break
-        while True:
-            z, ok = QInputDialog.getDouble(self, "Координата Z", "Введите координату Z (см):", 0.0, -10000.0, 10000.0, 1)
-            if not ok:
-                return self.get_anchor_parameters()
-            else:
-                break
+        z, ok = QInputDialog.getDouble(self, "Координата Z", "Введите координату Z (см):", 0.0, -10000.0, 10000.0, 1)
+        if not ok:
+            return None
         return num, z
 
     def get_zone_parameters(self):
@@ -862,15 +899,23 @@ class PlanEditorMainWindow(QMainWindow):
                         "id": obj.number,
                         "x": x_m,
                         "y": y_m,
-                        "z": fix_negative_zero(round(obj.z / 100.0, 1))
+                        "z": fix_negative_zero(round(obj.z/100.0, 1))
                     })
-                elif isinstance(obj, RectZoneItem):
-                    zone_data = obj.get_export_data()
-                    room["zones"].append({
-                        "num": obj.zone_num,
-                        "enter": zone_data if obj.zone_type == "Входная зона" else {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0},
-                        "exit": zone_data if obj.zone_type == "Выходная зона" else {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
-                    })
+            # Группировка зон по номеру с объединением входной и выходной
+            zones_group = {}
+            default_zone = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
+            for obj in hall.childItems():
+                if isinstance(obj, RectZoneItem):
+                    num = obj.zone_num
+                    if num not in zones_group:
+                        zones_group[num] = {"num": num, "enter": default_zone.copy(), "exit": default_zone.copy()}
+                    data = obj.get_export_data()
+                    if obj.zone_type == "Входная зона":
+                        zones_group[num]["enter"] = data
+                    elif obj.zone_type == "Выходная зона":
+                        zones_group[num]["exit"] = data
+            for zone in zones_group.values():
+                room["zones"].append(zone)
             config["rooms"].append(room)
         try:
             with open(file_path, 'w', encoding='utf-8') as f:
@@ -885,6 +930,7 @@ class PlanEditorMainWindow(QMainWindow):
                 if isinstance(item, HallItem):
                     if item in self.halls:
                         self.halls.remove(item)
+                item.setParentItem(None)
                 self.scene.removeItem(item)
         else:
             super().keyPressEvent(event)
@@ -912,7 +958,12 @@ class PlanEditorMainWindow(QMainWindow):
     def populate_tree(self):
         self.tree.clear()
         for hall in self.halls:
-            room_text = f'Зал {hall.number} "{hall.name}"'
+            w_m = hall.rect().width() / (self.scene.pixel_per_cm_x * 100)
+            h_m = hall.rect().height() / (self.scene.pixel_per_cm_x * 100)
+            if hall.name.strip():
+                room_text = f'Зал {hall.number} "{hall.name}" ({w_m:.1f} x {h_m:.1f} м)'
+            else:
+                room_text = f'Зал {hall.number} ({w_m:.1f} x {h_m:.1f} м)'
             room_text = self.wrap_text(room_text)
             hall_item = QTreeWidgetItem([room_text])
             hall.tree_item = hall_item
@@ -924,7 +975,7 @@ class PlanEditorMainWindow(QMainWindow):
                     ay = obj.pos().y()
                     x_m = fix_negative_zero(round(ax / (self.scene.pixel_per_cm_x * 100), 1))
                     y_m = fix_negative_zero(round((rect.height() - ay) / (self.scene.pixel_per_cm_x * 100), 1))
-                    anchor_text = f'Якорь {obj.number} (x={x_m} м, y={y_m} м, z={fix_negative_zero(round(obj.z / 100.0, 1))} м)'
+                    anchor_text = f'Якорь {obj.number} (x={x_m} м, y={y_m} м, z={fix_negative_zero(round(obj.z/100.0, 1))} м)'
                     anchor_text = self.wrap_text(anchor_text)
                     anchor_item = QTreeWidgetItem([anchor_text])
                     obj.tree_item = anchor_item
@@ -955,7 +1006,6 @@ class PlanEditorMainWindow(QMainWindow):
                 if hasattr(item, 'tree_item') and item.tree_item is not None:
                     item.tree_item.setSelected(True)
 
-    # Добавляем метод для обновления выделения в дереве.
     def update_tree_selection(self):
         items = [item for item in self.scene.items() if item.isSelected()]
         if items:
@@ -973,6 +1023,41 @@ class PlanEditorMainWindow(QMainWindow):
             for item in self.last_selected_items:
                 if hasattr(item, 'tree_item') and item.tree_item is not None:
                     item.tree_item.setSelected(True)
+
+    def handle_wheel_event(self, event):
+        factor = 1.2 if event.angleDelta().y() > 0 else 1/1.2
+        self.view.scale(factor, factor)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Delete:
+            for item in self.scene.selectedItems():
+                if isinstance(item, HallItem):
+                    if item in self.halls:
+                        self.halls.remove(item)
+                item.setParentItem(None)
+                self.scene.removeItem(item)
+        else:
+            super().keyPressEvent(event)
+
+    def hall_number_exists(self, num):
+        for hall in self.halls:
+            if hall.number == num:
+                return True
+        return False
+
+    def anchor_number_exists(self, num):
+        for hall in self.halls:
+            for child in hall.childItems():
+                if isinstance(child, AnchorItem) and child.number == num:
+                    return True
+        return False
+
+    def wrap_text(self, text):
+        metrics = self.tree.fontMetrics()
+        available_width = self.tree.viewport().width()
+        if metrics.horizontalAdvance(text) > available_width:
+            return text.replace(", ", ",\n")
+        return text
 
     def closeEvent(self, event):
         try:
