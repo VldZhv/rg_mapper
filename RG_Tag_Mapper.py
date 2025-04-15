@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox
 )
-from PySide6.QtGui import QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath
+from PySide6.QtGui import QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer
 
 def fix_negative_zero(val):
@@ -81,7 +81,7 @@ class ParamDialog(QDialog):
         return values
 
 # ===========================================================================
-# Функции для универсального ввода параметров объектов
+# Функции для ввода параметров объектов
 # ===========================================================================
 def getHallParameters(default_num=1, default_name=""):
     fields = [
@@ -117,7 +117,6 @@ def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_b
     return None
 
 def getZoneParameters(default_num=1, default_type="Входная зона", default_angle=0):
-    # Для диалогового окна меняем надписи: "Входная" вместо "Входная зона", "Выходная" вместо "Выходная зона"
     display_type = default_type
     if default_type == "Входная зона":
         display_type = "Входная"
@@ -152,9 +151,29 @@ class HallItem(QGraphicsRectItem):
         pen.setWidth(2)
         self.setPen(pen)
         self.setBrush(QColor(0, 0, 255, 50))
-        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable |
-                      QGraphicsItem.ItemSendsGeometryChanges)
+        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemSendsGeometryChanges)
+        self.setZValue(- (w * h))
         self.tree_item = None
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        painter.save()
+        font = QFont()
+        font.setBold(True)
+        painter.setFont(font)
+        fill_color = self.pen().color()
+        outline_color = QColor(180, 180, 180)
+        rect = self.rect()
+        # Номер зала отрисовывается в левом нижнем углу с отступом
+        pos = rect.bottomLeft() + QPointF(2, -2)
+        path = QPainterPath()
+        path.addText(pos, painter.font(), str(self.number))
+        outline_pen = QPen(outline_color, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(outline_pen)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.fillPath(path, fill_color)
+        painter.restore()
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionChange:
@@ -223,9 +242,32 @@ class AnchorItem(QGraphicsEllipseItem):
         pen.setWidth(2)
         self.setPen(pen)
         self.setBrush(QColor(255, 0, 0))
-        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable |
-                      QGraphicsItem.ItemSendsGeometryChanges)
+        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        painter.save()
+        font = QFont()
+        font.setBold(True)
+        painter.setFont(font)
+        fill_color = self.pen().color()
+        outline_color = QColor(180, 180, 180)
+        br = self.boundingRect()
+        # Поднимаем номер якоря чуть выше, чтобы он не перекрывал круг.
+        pos = QPointF(br.center().x() - br.width()/2, br.top() - 2)
+        path = QPainterPath()
+        path.addText(pos, painter.font(), str(self.number))
+        outline_pen = QPen(outline_color, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(outline_pen)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.fillPath(path, fill_color)
+        painter.restore()
+
+    def mouseMoveEvent(self, event):
+        super().mouseMoveEvent(event)
+        self.update()
 
     def mouseDoubleClickEvent(self, event):
         hall_ids = []
@@ -301,9 +343,29 @@ class RectZoneItem(QGraphicsRectItem):
             brush = QColor(128, 0, 128, 50)
         self.setPen(pen)
         self.setBrush(brush)
-        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable |
-                      QGraphicsItem.ItemSendsGeometryChanges)
+        self.setFlags(QGraphicsItem.ItemIsMovable | QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemSendsGeometryChanges)
+        self.setZValue(- (w * h))
         self.tree_item = None
+
+    def paint(self, painter, option, widget=None):
+        super().paint(painter, option, widget)
+        painter.save()
+        font = QFont()
+        font.setBold(True)
+        painter.setFont(font)
+        fill_color = self.pen().color()
+        outline_color = QColor(180, 180, 180)
+        rect = self.rect()
+        # Номер зоны отрисовывается в левом нижнем углу с отступом 2 пикселя
+        pos = rect.bottomLeft() + QPointF(2, -2)
+        path = QPainterPath()
+        path.addText(pos, painter.font(), str(self.zone_num))
+        outline_pen = QPen(outline_color, 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        painter.setPen(outline_pen)
+        painter.drawPath(path)
+        painter.setPen(Qt.NoPen)
+        painter.fillPath(path, fill_color)
+        painter.restore()
 
     def get_display_type(self):
         mapping = {"Входная зона": "входная", "Выходная зона": "выходная", "Переходная": "переходная"}
@@ -362,9 +424,6 @@ class RectZoneItem(QGraphicsRectItem):
             "angle": fix_negative_zero(round(self.zone_angle, 1))
         }
 
-# ===========================================================================
-# Класс представления (наследник QGraphicsView)
-# ===========================================================================
 class MyGraphicsView(QGraphicsView):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
@@ -373,9 +432,6 @@ class MyGraphicsView(QGraphicsView):
         except RuntimeError:
             pass
 
-# ===========================================================================
-# Кастомная сцена
-# ===========================================================================
 class PlanGraphicsScene(QGraphicsScene):
     def __init__(self):
         super().__init__()
@@ -638,9 +694,6 @@ class PlanGraphicsScene(QGraphicsScene):
         except RuntimeError:
             pass
 
-# ===========================================================================
-# Вспомогательные функции форматирования для экспорта конфигурации
-# ===========================================================================
 def format_simple_obj(obj):
     return '{ "x": ' + str(obj["x"]) + ', "y": ' + str(obj["y"]) + ', "w": ' + str(obj["w"]) + ', "h": ' + str(obj["h"]) + ', "angle": ' + str(obj["angle"]) + ' }'
 
@@ -661,9 +714,6 @@ def format_anchor(anchor):
     s += ' }'
     return s
 
-# ===========================================================================
-# Главное окно приложения
-# ===========================================================================
 class PlanEditorMainWindow(QMainWindow):
     def get_hall_parameters(self):
         default_num = 1
@@ -703,6 +753,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.scene.selectionChanged.connect(self.on_scene_selection_changed)
         self.view = MyGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
+        self.view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setCentralWidget(self.view)
         self.tree = QTreeWidget()
         self.tree.setHeaderLabel("Объекты")
@@ -813,7 +864,7 @@ class PlanEditorMainWindow(QMainWindow):
                     item.tree_item.setSelected(True)
 
     def handle_wheel_event(self, event):
-        factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+        factor = 1.2 if event.angleDelta().y() > 0 else 1/1.2
         self.view.scale(factor, factor)
 
     def keyPressEvent(self, event):
@@ -838,10 +889,6 @@ class PlanEditorMainWindow(QMainWindow):
         return False
 
     def wrap_text(self, text):
-        metrics = self.tree.fontMetrics()
-        available_width = self.tree.viewport().width()
-        if metrics.horizontalAdvance(text) > available_width:
-            return text.replace(", ", ",\n")
         return text
 
     def populate_tree(self):
@@ -853,7 +900,6 @@ class PlanEditorMainWindow(QMainWindow):
                 room_text = f'Зал {hall.number} "{hall.name}" ({w_m:.1f} x {h_m:.1f} м)'
             else:
                 room_text = f'Зал {hall.number} ({w_m:.1f} x {h_m:.1f} м)'
-            room_text = self.wrap_text(room_text)
             hall_item = QTreeWidgetItem([room_text])
             hall.tree_item = hall_item
             self.tree.addTopLevelItem(hall_item)
@@ -864,7 +910,6 @@ class PlanEditorMainWindow(QMainWindow):
                     x_m = fix_negative_zero(round(local.x() / (self.scene.pixel_per_cm_x * 100), 1))
                     y_m = fix_negative_zero(round((hall.rect().height() - local.y()) / (self.scene.pixel_per_cm_x * 100), 1))
                     anchor_text = f'Якорь {anchor.number} (x={x_m} м, y={y_m} м, z={fix_negative_zero(round(anchor.z/100.0, 1))} м)'
-                    anchor_text = self.wrap_text(anchor_text)
                     anchor_item = QTreeWidgetItem([anchor_text])
                     anchor.tree_item = anchor_item
                     hall_item.addChild(anchor_item)
@@ -875,19 +920,20 @@ class PlanEditorMainWindow(QMainWindow):
                     num = obj.zone_num
                     if num not in zones_group:
                         zones_group[num] = {"num": num, "enter": default_zone.copy(), "exit": default_zone.copy()}
-                    data = obj.get_export_data()
                     if obj.zone_type == "Входная зона":
-                        zones_group[num]["enter"] = data
+                        zones_group[num]["enter"] = obj.get_export_data()
                     elif obj.zone_type == "Выходная зона":
-                        zones_group[num]["exit"] = data
+                        zones_group[num]["exit"] = obj.get_export_data()
                     elif obj.zone_type == "Переходная":
-                        zones_group[num]["enter"] = data
+                        zones_group[num]["enter"] = obj.get_export_data()
                         zones_group[num]["exit"] = default_zone.copy()
                         zones_group[num]["bound"] = True
-            # Изменение: формируем строку для зон в одну строку, без переносов
             for zone in zones_group.values():
                 zone_text = f"Зона {zone['num']}: enter: x = {zone['enter']['x']} м, y = {zone['enter']['y']} м, w = {zone['enter']['w']} м, h = {zone['enter']['h']} м, angle = {zone['enter']['angle']}°; exit: x = {zone['exit']['x']} м, y = {zone['exit']['y']} м, w = {zone['exit']['w']} м, h = {zone['exit']['h']} м, angle = {zone['exit']['angle']}°"
                 zone_item = QTreeWidgetItem([zone_text])
+                for obj in hall.childItems():
+                    if isinstance(obj, RectZoneItem) and obj.zone_num == zone['num']:
+                        obj.tree_item = zone_item
                 hall_item.addChild(zone_item)
             hall_item.setExpanded(True)
 
@@ -932,7 +978,6 @@ class PlanEditorMainWindow(QMainWindow):
             self.current_project_file = file_path
         else:
             file_path = self.current_project_file
-
         image_data = ""
         if self.scene.pixmap:
             buffer = QBuffer()
