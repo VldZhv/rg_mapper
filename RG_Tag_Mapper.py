@@ -94,15 +94,17 @@ class LockDialog(QDialog):
 # ---------------------------------------------------------------------------
 # Initial parameter getters
 # ---------------------------------------------------------------------------
-def getHallParameters(default_num=1, default_name=""):
+def getHallParameters(default_num=1, default_name="", default_w=1.0, default_h=1.0, scene=None):
     fields = [
         {"label": "Номер зала", "type": "int", "default": default_num, "min": 0, "max": 10000},
-        {"label": "Название зала", "type": "string", "default": default_name}
+        {"label": "Название зала", "type": "string", "default": default_name},
+        {"label": "Ширина (м)", "type": "float", "default": default_w, "min": 0.1, "max": 1000.0, "decimals":1},
+        {"label": "Высота (м)", "type": "float", "default": default_h, "min": 0.1, "max": 1000.0, "decimals":1}
     ]
     dlg = ParamDialog("Введите параметры зала", fields)
     if dlg.exec() == QDialog.Accepted:
         v = dlg.getValues()
-        return v["Номер зала"], v["Название зала"]
+        return v["Номер зала"], v["Название зала"], v["Ширина (м)"], v["Высота (м)"]
     return None
 
 def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_bound=False):
@@ -138,13 +140,14 @@ def getZoneParameters(default_num=1, default_type="Входная зона", def
 # HallItem
 # ---------------------------------------------------------------------------
 class HallItem(QGraphicsRectItem):
-    def __init__(self, x, y, w, h, name="", number=0):
-        super().__init__(0, 0, w, h)
+    def __init__(self, x, y, w_px, h_px, name="", number=0, scene=None):
+        super().__init__(0, 0, w_px, h_px)
         self.setPos(x, y)
         self.name, self.number = name, number
+        self.scene_ref = scene
         self.setPen(QPen(QColor(0,0,255),2)); self.setBrush(QColor(0,0,255,50))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
-        self.setZValue(-w*h); self.tree_item = None
+        self.setZValue(-w_px*h_px); self.tree_item = None
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -158,40 +161,47 @@ class HallItem(QGraphicsRectItem):
         painter.restore()
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionChange:
+        if change == QGraphicsItem.ItemPositionChange and self.scene():
             new = QPointF(value)
-            try:
-                scene = self.scene()
-                if scene:
-                    sr = scene.sceneRect(); r = self.rect()
-                    new.setX(max(sr.left(), min(new.x(), sr.right()-r.width())))
-                    new.setY(max(sr.top(), min(new.y(), sr.bottom()-r.height())))
-                    step = scene.pixel_per_cm_x * scene.grid_step_cm
-                    if step>0:
-                        new.setX(round(new.x()/step)*step)
-                        new.setY(round(new.y()/step)*step)
-            except:
-                pass
+            sr = self.scene().sceneRect(); r = self.rect()
+            new.setX(max(sr.left(), min(new.x(), sr.right()-r.width())))
+            new.setY(max(sr.top(), min(new.y(), sr.bottom()-r.height())))
+            step = self.scene().pixel_per_cm_x * self.scene().grid_step_cm
+            if step>0:
+                new.setX(round(new.x()/step)*step)
+                new.setY(round(new.y()/step)*step)
             return new
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
         mw = self.scene().mainwindow
+        ppcm = self.scene().pixel_per_cm_x
         menu = QMenu()
-        h = menu.addAction(f"Зал {self.number}"); h.setEnabled(False)
+        header = menu.addAction(f"Зал {self.number}"); header.setEnabled(False)
         edit = menu.addAction("Редактировать зал")
         delete = menu.addAction("Удалить зал")
         act = menu.exec(event.screenPos())
         if act == edit:
-            params = mw.get_hall_parameters_edit(self.number, self.name)
+            # current dims in meters
+            w_m = self.rect().width()/(ppcm*100)
+            h_m = self.rect().height()/(ppcm*100)
+            params = getHallParameters(self.number, self.name, w_m, h_m, self.scene())
             if params:
+                new_num, new_name, new_w_m, new_h_m = params
+                # update anchors references if number changed
                 old = self.number
-                new_num, new_name = params
                 for a in mw.anchors:
                     if a.main_hall_number == old:
                         a.main_hall_number = new_num
                     a.extra_halls = [new_num if x==old else x for x in a.extra_halls]
                 self.number, self.name = new_num, new_name
+                # resize in pixels
+                w_px = new_w_m * ppcm * 100
+                h_px = new_h_m * ppcm * 100
+                self.prepareGeometryChange()
+                self.setRect(0, 0, w_px, h_px)
+                # adjust z-value so stacking remains by area
+                self.setZValue(-w_px*h_px)
                 mw.last_selected_items = []; mw.populate_tree()
         elif act == delete:
             anchors_rel = [a for a in mw.anchors if a.main_hall_number==self.number or self.number in a.extra_halls]
@@ -221,7 +231,7 @@ class HallItem(QGraphicsRectItem):
 # AnchorItem
 # ---------------------------------------------------------------------------
 class AnchorItem(QGraphicsEllipseItem):
-    def __init__(self, x, y, number=0, main_hall_number=None):
+    def __init__(self, x, y, number=0, main_hall_number=None, scene=None):
         r = 3
         super().__init__(-r,-r,2*r,2*r)
         self.setPos(x,y); self.number = number; self.z = 0
@@ -242,15 +252,12 @@ class AnchorItem(QGraphicsEllipseItem):
         painter.restore()
 
     def itemChange(self, change, value):
-        if change == QGraphicsItem.ItemPositionChange:
+        if change == QGraphicsItem.ItemPositionChange and self.scene():
             new = QPointF(value)
-            try:
-                step = self.scene().pixel_per_cm_x * self.scene().grid_step_cm
-                if step>0:
-                    new.setX(round(new.x()/step)*step)
-                    new.setY(round(new.y()/step)*step)
-            except:
-                pass
+            step = self.scene().pixel_per_cm_x * self.scene().grid_step_cm
+            if step>0:
+                new.setX(round(new.x()/step)*step)
+                new.setY(round(new.y()/step)*step)
             return new
         return super().itemChange(change, value)
 
@@ -271,6 +278,7 @@ class AnchorItem(QGraphicsEllipseItem):
         act = menu.exec(event.screenPos())
         if act == edit:
             fields = [
+                {"label": "Номер якоря", "type": "int", "default": self.number, "min": 0, "max": 10000},
                 {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
                 {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
                 {"label":"Координата Z (м)","type":"float","default":z_m,"min":-100,"max":100,"decimals":1},
@@ -280,15 +288,14 @@ class AnchorItem(QGraphicsEllipseItem):
             dlg = ParamDialog("Редактировать якорь", fields, mw)
             if dlg.exec() == QDialog.Accepted:
                 v = dlg.getValues()
+                self.number = v["Номер якоря"]
                 x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
                 self.bound = v["Переходный"]
                 self.extra_halls = [int(tok) for tok in v["Доп. залы"].split(",") if tok.strip().isdigit()]
                 self.z = int(round(z2*100))
-                # apply anchor move
                 px = x2 * ppcm * 100
                 py = hall.rect().height() - y2 * ppcm * 100
-                scene_pt = hall.mapToScene(QPointF(px, py))
-                self.setPos(scene_pt)
+                self.setPos(hall.mapToScene(QPointF(px, py)))
                 mw.last_selected_items = []; mw.populate_tree()
         elif act == delete:
             mw.anchors.remove(self); self.scene().removeItem(self)
@@ -339,7 +346,6 @@ class RectZoneItem(QGraphicsRectItem):
 
     def mouseDoubleClickEvent(self, event):
         scene = self.scene(); mw = scene.mainwindow
-        # pick smaller if overlapped
         zlist = [z for z in scene.items(event.scenePos())
                  if isinstance(z,RectZoneItem) and z.contains(z.mapFromScene(event.scenePos()))]
         if zlist:
@@ -347,19 +353,16 @@ class RectZoneItem(QGraphicsRectItem):
             if smaller:
                 min(smaller, key=lambda z: z.rect().width()*z.rect().height()).mouseDoubleClickEvent(event)
                 return
-
         data = self.get_export_data()
-        if data is None:
-            return
+        if data is None: return
         x_m, y_m, w_m, h_m, angle = data["x"], data["y"], data["w"], data["h"], data["angle"]
-
         menu = QMenu()
         header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()})"); header.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(event.screenPos())
-
         if act == edit:
             fields = [
+                {"label": "Номер зоны", "type": "int", "default": self.zone_num, "min": 0, "max": 10000},
                 {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
                 {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
                 {"label":"Ширина (м)","type":"float","default":w_m,"min":0,"max":10000,"decimals":1},
@@ -371,28 +374,23 @@ class RectZoneItem(QGraphicsRectItem):
             dlg = ParamDialog("Редактировать зону", fields, mw)
             if dlg.exec() == QDialog.Accepted:
                 v = dlg.getValues()
-                x2, y2 = v["Координата X (м)"], v["Координата Y (м)"]
-                w2, h2 = v["Ширина (м)"], v["Высота (м)"]
+                self.zone_num = v["Номер зоны"]
+                x2, y2, w2, h2 = v["Координата X (м)"], v["Координата Y (м)"], v["Ширина (м)"], v["Высота (м)"]
                 t2 = v["Тип зоны"]
                 full = {"Входная":"Входная зона","Выходная":"Выходная зона","Переходная":"Переходная"}[t2]
                 ang2 = v["Угол поворота (°)"]
                 hall = self.parentItem()
                 ppcm = scene.pixel_per_cm_x
-                # apply in correct order: resize, rotate, then move (in local coords)
-                self.zone_type, self.zone_angle = full, ang2
                 self.setRect(0, -h2*ppcm*100, w2*ppcm*100, h2*ppcm*100)
-                self.setTransformOriginPoint(0,0)
-                self.setRotation(-ang2)
-                # reposition: use local coords because this item has a parent
+                self.setTransformOriginPoint(0,0); self.setRotation(-ang2)
+                self.zone_type, self.zone_angle = full, ang2
                 px = x2 * ppcm * 100
                 py = hall.rect().height() - y2 * ppcm * 100
                 self.setPos(QPointF(px, py))
                 mw.last_selected_items = []; mw.populate_tree()
-
         elif act == delete:
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
-
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -497,7 +495,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
                 num, z, extras, bound = params
-                a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number)
+                a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
                 a.z, a.extra_halls, a.bound = z, extras, bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
@@ -531,13 +529,24 @@ class PlanGraphicsScene(QGraphicsScene):
                 x1,y1=round(x1/step)*step,round(y1/step)*step
             if x1==x0: x1=x0+step
             if y1==y0: y1=y0+step
-            h = HallItem(x0,y0,x1-x0,y1-y0,"",0)
-            self.addItem(h); mw.halls.append(h)
-            params = mw.get_hall_parameters()
+            w_px, h_px = x1-x0, y1-y0
+            hall = HallItem(x0, y0, w_px, h_px, "", 0, scene=self)
+            self.addItem(hall); mw.halls.append(hall)
+            # prompt parameters
+            w_m = w_px/(self.pixel_per_cm_x*100)
+            h_m = h_px/(self.pixel_per_cm_x*100)
+            params = getHallParameters(1, "", w_m, h_m, self)
             if not params:
-                self.removeItem(h); mw.halls.remove(h)
+                self.removeItem(hall); mw.halls.remove(hall)
             else:
-                h.number,h.name=params
+                num, name, new_w_m, new_h_m = params
+                hall.number, hall.name = num, name
+                # resize if needed
+                w2_px = new_w_m * self.pixel_per_cm_x * 100
+                h2_px = new_h_m * self.pixel_per_cm_x * 100
+                hall.prepareGeometryChange()
+                hall.setRect(0,0,w2_px,h2_px)
+                hall.setZValue(-w2_px*h2_px)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
@@ -559,7 +568,7 @@ class PlanGraphicsScene(QGraphicsScene):
             if y1==y0: y1=y0+step
             bl = QPointF(min(x0,x1), max(y0,y1))
             w_pix, h_pix = abs(x1-x0), abs(y1-y0)
-            params = mw.get_zone_parameters()
+            params = getZoneParameters(1, "Входная зона", 0)
             if not params:
                 if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
                 mw.temp_start_point=None; mw.add_mode=None
@@ -641,24 +650,15 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
 
     # Parameter getters...
-    def get_hall_parameters(self):
-        default = 1 if not self.halls else max(h.number for h in self.halls)+1
-        return getHallParameters(default, "")
-    def get_hall_parameters_edit(self, num, name):
-        return getHallParameters(num, name)
     def get_anchor_parameters(self):
         default = 1 if not self.anchors else max(a.number for a in self.anchors)+1
         return getAnchorParameters(default, 0, "", False)
-    def get_anchor_parameters_edit(self, num, z, extras, bound):
-        return getAnchorParameters(num, z, extras, bound)
     def get_zone_parameters(self):
         default = 1
         if self.current_hall_for_zone:
             zs = [ch for ch in self.current_hall_for_zone.childItems() if isinstance(ch,RectZoneItem)]
             if zs: default = max(z.zone_num for z in zs)+1
         return getZoneParameters(default, "Входная зона", 0)
-    def get_zone_parameters_edit(self, num, zt, angle):
-        return getZoneParameters(num, zt, angle)
 
     # Locking
     def lock_objects(self):
@@ -883,7 +883,8 @@ class PlanEditorMainWindow(QMainWindow):
             h = HallItem(
                 hd.get("x_px",0), hd.get("y_px",0),
                 hd.get("w_px",100), hd.get("h_px",100),
-                hd.get("name",""), hd.get("num",0)
+                hd.get("name",""), hd.get("num",0),
+                scene=self.scene
             )
             self.scene.addItem(h); self.halls.append(h)
             for zd in hd.get("zones",[]):
@@ -898,7 +899,8 @@ class PlanEditorMainWindow(QMainWindow):
             a = AnchorItem(
                 ad.get("x",0), ad.get("y",0),
                 ad.get("number",0),
-                main_hall_number=ad.get("main_hall")
+                main_hall_number=ad.get("main_hall"),
+                scene=self.scene
             )
             a.z = ad.get("z",0)
             a.extra_halls = ad.get("extra_halls",[])
@@ -941,7 +943,6 @@ class PlanEditorMainWindow(QMainWindow):
                 room["zones"].append(z)
             config["rooms"].append(room)
 
-        # pretty JSON
         result = '{\n"rooms": [\n'
         room_strs = []
         for room in config["rooms"]:
