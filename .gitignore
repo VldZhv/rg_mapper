@@ -1,6 +1,5 @@
 build/
 dist/
-*.ico
 *.spec
 *.json
 *.proj

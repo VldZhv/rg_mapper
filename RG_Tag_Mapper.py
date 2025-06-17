@@ -914,65 +914,98 @@ class PlanEditorMainWindow(QMainWindow):
     def export_config(self):
         fp,_ = QFileDialog.getSaveFileName(self,"Экспорт JSON","","*.json")
         if not fp: return
-        config = {"rooms":[]}
+
+        config = {"rooms": []}
         for h in self.halls:
-            room = {"num":h.number, "anchors":[], "zones":[]}
+            # compute hall size in meters
+            w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
+            h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
+
+            room = {
+                "num": h.number,
+                "width": w_m,
+                "height": h_m,
+                "anchors": [],
+                "zones": []
+            }
+
+            # anchors
             for a in self.anchors:
-                if a.main_hall_number==h.number or h.number in a.extra_halls:
+                if a.main_hall_number == h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
-                    xm = fix_negative_zero(round(lp.x()/(self.scene.pixel_per_cm_x*100),1))
-                    ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
-                    ae = {"id":a.number, "x":xm, "y":ym, "z":fix_negative_zero(round(a.z/100,1))}
-                    if a.bound: ae["bound"]=True
+                    xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
+                    ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
+                    ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z/100, 1))}
+                    if a.bound:
+                        ae["bound"] = True
                     room["anchors"].append(ae)
+
+            # zones
             zones = {}
-            default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
+            default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for ch in h.childItems():
-                if isinstance(ch,RectZoneItem):
+                if isinstance(ch, RectZoneItem):
                     n = ch.zone_num
                     if n not in zones:
-                        zones[n] = {"num":n, "enter":default.copy(), "exit":default.copy()}
+                        zones[n] = {"num": n, "enter": default.copy(), "exit": default.copy()}
                     dz = ch.get_export_data()
-                    if ch.zone_type=="Входная зона":
+                    if ch.zone_type == "Входная зона":
                         zones[n]["enter"] = dz
-                    elif ch.zone_type=="Выходная зона":
+                    elif ch.zone_type == "Выходная зона":
                         zones[n]["exit"] = dz
-                    elif ch.zone_type=="Переходная":
-                        zones[n]["enter"]=dz; zones[n]["bound"]=True
+                    elif ch.zone_type == "Переходная":
+                        zones[n]["enter"] = dz
+                        zones[n]["bound"] = True
+
             for z in zones.values():
                 room["zones"].append(z)
+
             config["rooms"].append(room)
 
-        result = '{\n"rooms": [\n'
+        # build nicely formatted JSON text including width/height
+        result = '{\n  "rooms": [\n'
         room_strs = []
         for room in config["rooms"]:
-            lines = ['{', f'"num": {room["num"]},', '"anchors": [']
+            lines = [
+                "    {",
+                f'      "num": {room["num"]},',
+                f'      "width": {room["width"]},',
+                f'      "height": {room["height"]},',
+                f'      "anchors": ['
+            ]
             alines = []
             for a in room["anchors"]:
-                s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
-                if a.get("bound"): s += ', "bound": true'
-                s += ' }'; alines.append(s)
-            lines.append(",\n".join(alines)); lines.append('],'); lines.append('"zones": [')
+                s = f'        {{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
+                if a.get("bound"):
+                    s += ', "bound": true'
+                s += " }"
+                alines.append(s)
+            lines.append(",\n".join(alines))
+            lines.append("      ],")
+            lines.append('      "zones": [')
             zlines = []
             for z in room["zones"]:
-                zl = '{'
-                zl += f'\n"num": {z["num"]},'
-                zl += (f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
-                       f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
-                       f'"angle": {z["enter"]["angle"]} }},')
-                zl += (f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
-                       f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
-                       f'"angle": {z["exit"]["angle"]} }}')
-                if z.get("bound"): zl += ',\n"bound": true'
-                zl += '\n}'; zlines.append(zl)
-            lines.append(",\n".join(zlines)); lines.append(']'); lines.append('}')
+                zl = "        {"
+                zl += f'\n          "num": {z["num"]},'
+                zl += f'\n          "enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, "w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, "angle": {z["enter"]["angle"]} }},'
+                zl += f'\n          "exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, "w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, "angle": {z["exit"]["angle"]} }}'
+                if z.get("bound"):
+                    zl += ',\n          "bound": true'
+                zl += "\n        }"
+                zlines.append(zl)
+            lines.append(",\n".join(zlines))
+            lines.append("      ]")
+            lines.append("    }")
             room_strs.append("\n".join(lines))
-        result += ",\n".join(room_strs) + '\n]\n}'
+        result += ",\n".join(room_strs)
+        result += '\n  ]\n}'
+
         try:
-            with open(fp,"w",encoding="utf-8") as f: f.write(result)
-            QMessageBox.information(self,"Экспорт","Экспорт завершён.")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(result)
+            QMessageBox.information(self, "Экспорт", "Экспорт завершён.")
         except Exception as e:
-            QMessageBox.critical(self,"Ошибка",f"Не удалось экспортировать:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def closeEvent(self, event):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
