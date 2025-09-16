@@ -1,19 +1,231 @@
-import sys, math, json, base64
+import sys, math, json, base64, os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
-    QLabel, QInputDialog, QCheckBox
+    QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QGroupBox
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
     QPdfWriter, QPageSize, QCursor
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
+from datetime import datetime
+from mutagen.mp3 import MP3
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
+
+# ---------------------------------------------------------------------------
+# Audio helpers and widgets
+# ---------------------------------------------------------------------------
+def extract_track_id(filename: str) -> int:
+    name = os.path.splitext(os.path.basename(filename))[0]
+    digits = ''.join(ch for ch in name if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def parse_additional_ids(text: str):
+    ids = []
+    for token in text.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError:
+            continue
+    return ids
+
+
+def load_audio_file_info(path: str):
+    try:
+        audio = MP3(path)
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
+    duration_ms = int(round(audio.info.length * 1000)) if audio.info.length else 0
+    with open(path, 'rb') as fh:
+        encoded = base64.b64encode(fh.read()).decode('ascii')
+    return {
+        'filename': os.path.basename(path),
+        'data': encoded,
+        'duration_ms': duration_ms
+    }
+
+
+class AudioTrackWidget(QWidget):
+    def __init__(self, parent=None, data=None):
+        super().__init__(parent)
+        self.main_file_info = None
+        self.secondary_file_info = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QLabel("Аудио трек")
+        header.setStyleSheet("font-weight: bold;")
+        layout.addWidget(header)
+
+        main_row = QWidget()
+        main_row_layout = QHBoxLayout(main_row)
+        main_row_layout.setContentsMargins(0, 0, 0, 0)
+        main_row_layout.addWidget(QLabel("Файл:"))
+        self.main_file_label = QLabel("Не выбран")
+        main_row_layout.addWidget(self.main_file_label)
+        main_row_layout.addStretch(1)
+        self.select_button = QPushButton("Выбрать MP3…")
+        self.select_button.clicked.connect(self._select_main_file)
+        main_row_layout.addWidget(self.select_button)
+        self.clear_main_button = QPushButton("Очистить")
+        self.clear_main_button.clicked.connect(self._clear_main_file)
+        main_row_layout.addWidget(self.clear_main_button)
+        layout.addWidget(main_row)
+
+        self.settings_container = QGroupBox()
+        self.settings_container.setTitle("")
+        self.settings_layout = QFormLayout(self.settings_container)
+        self.settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.track_id_label = QLabel("-")
+        self.settings_layout.addRow("ID трека:", self.track_id_label)
+
+        sec_widget = QWidget()
+        sec_layout = QHBoxLayout(sec_widget)
+        sec_layout.setContentsMargins(0, 0, 0, 0)
+        self.secondary_label = QLabel("Не выбран")
+        sec_layout.addWidget(self.secondary_label)
+        sec_layout.addStretch(1)
+        self.secondary_button = QPushButton("Добавить MP3…")
+        self.secondary_button.clicked.connect(self._select_secondary_file)
+        sec_layout.addWidget(self.secondary_button)
+        self.clear_secondary_button = QPushButton("Очистить")
+        self.clear_secondary_button.clicked.connect(self._clear_secondary_file)
+        sec_layout.addWidget(self.clear_secondary_button)
+        self.settings_layout.addRow("Доп. аудиотрек:", sec_widget)
+
+        self.extra_ids_edit = QLineEdit()
+        self.extra_ids_edit.setPlaceholderText("Например: 101, 131")
+        self.settings_layout.addRow("Дополнительные ID:", self.extra_ids_edit)
+
+        self.interruptible_box = QCheckBox("Прерываемый")
+        self.interruptible_box.setChecked(True)
+        self.reset_box = QCheckBox("Сброс")
+        self.play_once_box = QCheckBox("Играть единожды")
+        flags_widget = QWidget()
+        flags_layout = QHBoxLayout(flags_widget)
+        flags_layout.setContentsMargins(0, 0, 0, 0)
+        flags_layout.addWidget(self.interruptible_box)
+        flags_layout.addWidget(self.reset_box)
+        flags_layout.addWidget(self.play_once_box)
+        flags_layout.addStretch(1)
+        self.settings_layout.addRow(flags_widget)
+
+        layout.addWidget(self.settings_container)
+
+        self._update_state()
+        if data:
+            self.set_data(data)
+
+    def set_data(self, data):
+        if not data:
+            self._clear_main_file()
+            return
+        self.main_file_info = {
+            'filename': data.get('filename'),
+            'data': data.get('data'),
+            'duration_ms': data.get('duration_ms', 0)
+        }
+        self.secondary_file_info = None
+        if data.get('secondary'):
+            sec = data['secondary']
+            self.secondary_file_info = {
+                'filename': sec.get('filename'),
+                'data': sec.get('data'),
+                'duration_ms': sec.get('duration_ms', 0)
+            }
+        self.extra_ids_edit.setText(', '.join(str(x) for x in data.get('extra_ids', [])))
+        self.interruptible_box.setChecked(data.get('interruptible', True))
+        self.reset_box.setChecked(data.get('reset', False))
+        self.play_once_box.setChecked(data.get('play_once', False))
+        self._update_state()
+
+    def get_data(self):
+        if not self.main_file_info:
+            return None
+        result = {
+            'filename': self.main_file_info['filename'],
+            'data': self.main_file_info['data'],
+            'duration_ms': self.main_file_info.get('duration_ms', 0),
+            'extra_ids': parse_additional_ids(self.extra_ids_edit.text()),
+            'interruptible': self.interruptible_box.isChecked(),
+            'reset': self.reset_box.isChecked(),
+            'play_once': self.play_once_box.isChecked()
+        }
+        if self.secondary_file_info:
+            result['secondary'] = {
+                'filename': self.secondary_file_info['filename'],
+                'data': self.secondary_file_info['data'],
+                'duration_ms': self.secondary_file_info.get('duration_ms', 0)
+            }
+        return result
+
+    def _select_main_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать аудио", "", "MP3 файлы (*.mp3)")
+        if not path:
+            return
+        try:
+            info = load_audio_file_info(path)
+        except ValueError as err:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
+            return
+        self.main_file_info = info
+        if not self.interruptible_box.isChecked():
+            self.interruptible_box.setChecked(True)
+        self._update_state()
+
+    def _select_secondary_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать дополнительный аудио", "", "MP3 файлы (*.mp3)")
+        if not path:
+            return
+        try:
+            info = load_audio_file_info(path)
+        except ValueError as err:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
+            return
+        self.secondary_file_info = info
+        self._update_state()
+
+    def _clear_main_file(self):
+        self.main_file_info = None
+        self.secondary_file_info = None
+        self.extra_ids_edit.clear()
+        self.interruptible_box.setChecked(True)
+        self.reset_box.setChecked(False)
+        self.play_once_box.setChecked(False)
+        self._update_state()
+
+    def _clear_secondary_file(self):
+        self.secondary_file_info = None
+        self._update_state()
+
+    def _update_state(self):
+        has_main = self.main_file_info is not None
+        self.clear_main_button.setEnabled(has_main)
+        self.settings_container.setVisible(has_main)
+        self.secondary_button.setEnabled(has_main)
+        self.clear_secondary_button.setEnabled(has_main and self.secondary_file_info is not None)
+        if has_main:
+            filename = self.main_file_info.get('filename', 'Не выбран')
+            self.main_file_label.setText(filename)
+            self.track_id_label.setText(filename)
+        else:
+            self.main_file_label.setText("Не выбран")
+            self.track_id_label.setText("-")
+        if self.secondary_file_info:
+            self.secondary_label.setText(self.secondary_file_info.get('filename', ''))
+        else:
+            self.secondary_label.setText("Не выбран")
 
 # ---------------------------------------------------------------------------
 # Universal parameter dialog
@@ -137,6 +349,137 @@ def getZoneParameters(default_num=1, default_type="Входная зона", def
     return None
 
 # ---------------------------------------------------------------------------
+# Edit dialogs with audio controls
+# ---------------------------------------------------------------------------
+class HallEditDialog(QDialog):
+    def __init__(self, hall_item, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать зал")
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(hall_item.number)
+        form.addRow("Номер зала", self.num_spin)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(hall_item.name)
+        form.addRow("Название зала", self.name_edit)
+
+        ppcm = hall_item.scene().pixel_per_cm_x if hall_item.scene() else 1.0
+        width_m = hall_item.rect().width()/(ppcm*100)
+        height_m = hall_item.rect().height()/(ppcm*100)
+
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setDecimals(1)
+        self.width_spin.setRange(0.1, 1000.0)
+        self.width_spin.setValue(width_m)
+        form.addRow("Ширина (м)", self.width_spin)
+
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setDecimals(1)
+        self.height_spin.setRange(0.1, 1000.0)
+        self.height_spin.setValue(height_m)
+        form.addRow("Высота (м)", self.height_spin)
+
+        self.audio_widget = AudioTrackWidget(self, hall_item.audio_settings)
+        layout.addWidget(self.audio_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        return {
+            'number': self.num_spin.value(),
+            'name': self.name_edit.text(),
+            'width': self.width_spin.value(),
+            'height': self.height_spin.value(),
+            'audio': self.audio_widget.get_data()
+        }
+
+
+class ZoneEditDialog(QDialog):
+    def __init__(self, zone_item, audio_data=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать зону")
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(zone_item.zone_num)
+        form.addRow("Номер зоны", self.num_spin)
+
+        self.type_combo = QComboBox()
+        options = ["Входная", "Выходная", "Переходная"]
+        for opt in options:
+            self.type_combo.addItem(opt)
+        current = zone_item.zone_type.replace(" зона", "")
+        if current in options:
+            self.type_combo.setCurrentIndex(options.index(current))
+        form.addRow("Тип зоны", self.type_combo)
+
+        data = zone_item.get_export_data() or {"x":0.0,"y":0.0,"w":0.0,"h":0.0,"angle":0}
+
+        self.x_spin = QDoubleSpinBox()
+        self.x_spin.setDecimals(1)
+        self.x_spin.setRange(0.0, 1000.0)
+        self.x_spin.setValue(data['x'])
+
+        self.y_spin = QDoubleSpinBox()
+        self.y_spin.setDecimals(1)
+        self.y_spin.setRange(0.0, 1000.0)
+        self.y_spin.setValue(data['y'])
+
+        self.w_spin = QDoubleSpinBox()
+        self.w_spin.setDecimals(1)
+        self.w_spin.setRange(0.0, 1000.0)
+        self.w_spin.setValue(data['w'])
+
+        self.h_spin = QDoubleSpinBox()
+        self.h_spin.setDecimals(1)
+        self.h_spin.setRange(0.0, 1000.0)
+        self.h_spin.setValue(data['h'])
+
+        form.addRow("Координата X (м)", self.x_spin)
+        form.addRow("Координата Y (м)", self.y_spin)
+        form.addRow("Ширина (м)", self.w_spin)
+        form.addRow("Высота (м)", self.h_spin)
+
+        self.angle_spin = QSpinBox()
+        self.angle_spin.setRange(-90, 90)
+        self.angle_spin.setValue(int(data['angle']))
+        form.addRow("Угол поворота (°)", self.angle_spin)
+
+        self.audio_widget = AudioTrackWidget(self, audio_data)
+        layout.addWidget(self.audio_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        full_type = {"Входная": "Входная зона", "Выходная": "Выходная зона", "Переходная": "Переходная"}[self.type_combo.currentText()]
+        return {
+            'zone_num': self.num_spin.value(),
+            'zone_type': full_type,
+            'x': self.x_spin.value(),
+            'y': self.y_spin.value(),
+            'w': self.w_spin.value(),
+            'h': self.h_spin.value(),
+            'angle': self.angle_spin.value(),
+            'audio': self.audio_widget.get_data()
+        }
+
+# ---------------------------------------------------------------------------
 # HallItem
 # ---------------------------------------------------------------------------
 class HallItem(QGraphicsRectItem):
@@ -148,6 +491,8 @@ class HallItem(QGraphicsRectItem):
         self.setPen(QPen(QColor(0,0,255),2)); self.setBrush(QColor(0,0,255,50))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(-w_px*h_px); self.tree_item = None
+        self.audio_settings = None
+        self.zone_audio_tracks = {}
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -184,25 +529,27 @@ class HallItem(QGraphicsRectItem):
         delete = menu.addAction("Удалить зал")
         act = menu.exec(global_pos)
         if act == edit:
-            # current dims in meters
-            w_m = self.rect().width()/(ppcm*100)
-            h_m = self.rect().height()/(ppcm*100)
-            params = getHallParameters(self.number, self.name, w_m, h_m, self.scene())
-            if params:
-                new_num, new_name, new_w_m, new_h_m = params
+            dlg = HallEditDialog(self, mw)
+            if dlg.exec() == QDialog.Accepted:
+                values = dlg.values()
+                new_num = values['number']
+                new_name = values['name']
+                new_w_m = values['width']
+                new_h_m = values['height']
+                self.audio_settings = values['audio']
                 old = self.number
                 for a in mw.anchors:
                     if a.main_hall_number == old:
                         a.main_hall_number = new_num
                     a.extra_halls = [new_num if x==old else x for x in a.extra_halls]
                 self.number, self.name = new_num, new_name
-                # resize in pixels
                 w_px = new_w_m * ppcm * 100
                 h_px = new_h_m * ppcm * 100
                 self.prepareGeometryChange()
                 self.setRect(0, 0, w_px, h_px)
                 self.setZValue(-w_px*h_px)
-                mw.last_selected_items = []; mw.populate_tree()
+                mw.last_selected_items = []
+                mw.populate_tree()
         elif act == delete:
             anchors_rel = [a for a in mw.anchors if a.main_hall_number==self.number or self.number in a.extra_halls]
             zones_rel = [z for z in self.childItems() if isinstance(z, RectZoneItem)]
@@ -358,40 +705,55 @@ class RectZoneItem(QGraphicsRectItem):
         mw = scene.mainwindow
         data = self.get_export_data()
         if data is None: return
-        x_m, y_m, w_m, h_m, angle = data["x"], data["y"], data["w"], data["h"], data["angle"]
         menu = QMenu()
         header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()})"); header.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
-            fields = [
-                {"label": "Номер зоны", "type": "int", "default": self.zone_num, "min": 0, "max": 10000},
-                {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Ширина (м)","type":"float","default":w_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Высота (м)","type":"float","default":h_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Тип зоны","type":"combo","default": self.zone_type.replace(" зона",""),
-                 "options":["Входная","Выходная","Переходная"]},
-                {"label":"Угол поворота (°)","type":"int","default":int(angle),"min":-90,"max":90}
-            ]
-            dlg = ParamDialog("Редактировать зону", fields, mw)
+            hall = self.parentItem()
+            if not hall:
+                return
+            current_audio = hall.zone_audio_tracks.get(self.zone_num) if hall else None
+            dlg = ZoneEditDialog(self, current_audio, mw)
             if dlg.exec() == QDialog.Accepted:
-                v = dlg.getValues()
-                self.zone_num = v["Номер зоны"]
-                x2, y2, w2, h2 = v["Координата X (м)"], v["Координата Y (м)"], v["Ширина (м)"], v["Высота (м)"]
-                t2 = v["Тип зоны"]
-                full = {"Входная":"Входная зона","Выходная":"Выходная зона","Переходная":"Переходная"}[t2]
-                ang2 = v["Угол поворота (°)"]
-                hall = self.parentItem()
+                values = dlg.values()
+                old_num = self.zone_num
+                self.zone_num = values['zone_num']
+                self.zone_type = values['zone_type']
+                self.zone_angle = values['angle']
+                if self.zone_type in ("Входная зона", "Переходная"):
+                    self.setPen(QPen(QColor(0,128,0),2))
+                    self.setBrush(QBrush(QColor(0,128,0,50)))
+                else:
+                    self.setPen(QPen(QColor(128,0,128),2))
+                    self.setBrush(QBrush(QColor(128,0,128,50)))
                 ppcm = scene.pixel_per_cm_x
-                self.setRect(0, -h2*ppcm*100, w2*ppcm*100, h2*ppcm*100)
-                self.setTransformOriginPoint(0,0); self.setRotation(-ang2)
-                self.zone_type, self.zone_angle = full, ang2
-                px = x2 * ppcm * 100
-                py = hall.rect().height() - y2 * ppcm * 100
+                w_px = values['w'] * ppcm * 100
+                h_px = values['h'] * ppcm * 100
+                self.prepareGeometryChange()
+                self.setRect(0, -h_px, w_px, h_px)
+                self.setTransformOriginPoint(0,0)
+                self.setRotation(-self.zone_angle)
+                px = values['x'] * ppcm * 100
+                py = hall.rect().height() - values['y'] * ppcm * 100
                 self.setPos(QPointF(px, py))
-                mw.last_selected_items = []; mw.populate_tree()
+                audio_data = values['audio']
+                if audio_data:
+                    hall.zone_audio_tracks[self.zone_num] = audio_data
+                else:
+                    hall.zone_audio_tracks.pop(self.zone_num, None)
+                if old_num != self.zone_num:
+                    others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == old_num and z is not self]
+                    if not others:
+                        hall.zone_audio_tracks.pop(old_num, None)
+                mw.last_selected_items = []
+                mw.populate_tree()
         elif act == delete:
+            hall = self.parentItem()
+            if hall:
+                others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == self.zone_num and z is not self]
+                if not others:
+                    hall.zone_audio_tracks.pop(self.zone_num, None)
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
@@ -789,6 +1151,12 @@ class PlanEditorMainWindow(QMainWindow):
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
             for it in self.scene.selectedItems():
+                if isinstance(it, RectZoneItem):
+                    hall = it.parentItem()
+                    if hall:
+                        others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == it.zone_num and z is not it]
+                        if not others:
+                            hall.zone_audio_tracks.pop(it.zone_num, None)
                 if isinstance(it,HallItem) and it in self.halls: self.halls.remove(it)
                 if it in self.anchors: self.anchors.remove(it)
                 self.scene.removeItem(it)
@@ -894,6 +1262,10 @@ class PlanEditorMainWindow(QMainWindow):
                 "x_px": h.pos().x(), "y_px": h.pos().y(),
                 "w_px": h.rect().width(), "h_px": h.rect().height()
             }
+            if h.audio_settings:
+                hd["audio"] = h.audio_settings
+            if h.zone_audio_tracks:
+                hd["zone_audio"] = {str(k): v for k, v in h.zone_audio_tracks.items()}
             zs = []
             for ch in h.childItems():
                 if isinstance(ch,RectZoneItem):
@@ -951,6 +1323,10 @@ class PlanEditorMainWindow(QMainWindow):
                 hd.get("name",""), hd.get("num",0),
                 scene=self.scene
             )
+            h.audio_settings = hd.get("audio")
+            zone_audio_raw = hd.get("zone_audio", {})
+            if zone_audio_raw:
+                h.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
             self.scene.addItem(h); self.halls.append(h)
             for zd in hd.get("zones",[]):
                 bl = QPointF(zd.get("bottom_left_x",0), zd.get("bottom_left_y",0))
@@ -980,6 +1356,52 @@ class PlanEditorMainWindow(QMainWindow):
         fp,_ = QFileDialog.getSaveFileName(self,"Экспорт JSON","","*.json")
         if not fp: return
         config = {"rooms":[]}
+        audio_files_map = {}
+        track_entries = []
+
+        def collect_audio_files(info):
+            if not info:
+                return
+            name = info.get("filename")
+            if name:
+                audio_files_map[name] = int(info.get("duration_ms", 0))
+            secondary = info.get("secondary")
+            if isinstance(secondary, dict):
+                sec_name = secondary.get("filename")
+                if sec_name:
+                    audio_files_map[sec_name] = int(secondary.get("duration_ms", 0))
+
+        def create_track_entry(info, room_id, is_hall):
+            if not info:
+                return None
+            filename = info.get("filename")
+            if not filename:
+                return None
+            base_id = extract_track_id(filename)
+            extras = [i for i in info.get("extra_ids", []) if isinstance(i, int)]
+            multi = []
+            seen = set()
+            for mid in [base_id] + extras:
+                if mid in seen:
+                    continue
+                multi.append(mid)
+                seen.add(mid)
+            entry = {
+                "audio": filename,
+                "hall": is_hall,
+                "id": base_id,
+                "multi_id": multi,
+                "name": "",
+                "play_once": bool(info.get("play_once", False)),
+                "reset": bool(info.get("reset", False)),
+                "room_id": room_id,
+                "term": bool(info.get("interruptible", True))
+            }
+            secondary = info.get("secondary")
+            if isinstance(secondary, dict) and secondary.get("filename"):
+                entry["audio2"] = secondary["filename"]
+            return entry
+
         for h in self.halls:
             room = {"num":h.number, "anchors":[], "zones":[]}
             for a in self.anchors:
@@ -1007,6 +1429,18 @@ class PlanEditorMainWindow(QMainWindow):
             for z in zones.values():
                 room["zones"].append(z)
             config["rooms"].append(room)
+            if h.audio_settings:
+                collect_audio_files(h.audio_settings)
+                entry = create_track_entry(h.audio_settings, h.number, True)
+                if entry:
+                    track_entries.append(entry)
+            for _, audio_info in sorted(h.zone_audio_tracks.items()):
+                if not audio_info:
+                    continue
+                collect_audio_files(audio_info)
+                entry = create_track_entry(audio_info, h.number, False)
+                if entry:
+                    track_entries.append(entry)
 
         result = '{\n"rooms": [\n'
         room_strs = []
@@ -1033,9 +1467,21 @@ class PlanEditorMainWindow(QMainWindow):
             lines.append(",\n".join(zlines)); lines.append(']'); lines.append('}')
             room_strs.append("\n".join(lines))
         result += ",\n".join(room_strs) + '\n]\n}'
+        track_entries.sort(key=lambda item: (item["room_id"], not item["hall"], item["id"]))
+        files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
+        tracks_data = {
+            "files": files_list,
+            "langs": [],
+            "tracks": track_entries,
+            "version": datetime.now().strftime("%y%m%d")
+        }
+        tracks_path = os.path.join(os.path.dirname(fp), "tracks.json")
         try:
-            with open(fp,"w",encoding="utf-8") as f: f.write(result)
-            QMessageBox.information(self,"Экспорт","Экспорт завершён.")
+            with open(fp,"w",encoding="utf-8") as f:
+                f.write(result)
+            with open(tracks_path,"w",encoding="utf-8") as f:
+                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
+            QMessageBox.information(self,"Экспорт","Экспорт завершён. Файл tracks.json создан.")
         except Exception as e:
             QMessageBox.critical(self,"Ошибка",f"Не удалось экспортировать:\n{e}")
 
