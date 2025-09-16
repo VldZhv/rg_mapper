@@ -1,4 +1,4 @@
-import sys, math, json, base64, os
+﻿import sys, math, json, base64, os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -430,12 +430,12 @@ class ZoneEditDialog(QDialog):
 
         self.x_spin = QDoubleSpinBox()
         self.x_spin.setDecimals(1)
-        self.x_spin.setRange(0.0, 1000.0)
+        self.x_spin.setRange(-1000.0, 1000.0)
         self.x_spin.setValue(data['x'])
 
         self.y_spin = QDoubleSpinBox()
         self.y_spin.setDecimals(1)
-        self.y_spin.setRange(0.0, 1000.0)
+        self.y_spin.setRange(-1000.0, 1000.0)
         self.y_spin.setValue(data['y'])
 
         self.w_spin = QDoubleSpinBox()
@@ -494,6 +494,12 @@ class HallItem(QGraphicsRectItem):
         self.audio_settings = None
         self.zone_audio_tracks = {}
 
+    def update_zvalue(self):
+        hall = self.parentItem()
+        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
+        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
+        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
+
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
         painter.save()
@@ -515,6 +521,11 @@ class HallItem(QGraphicsRectItem):
             if step>0:
                 new.setX(round(new.x()/step)*step)
                 new.setY(round(new.y()/step)*step)
+            delta = new - self.pos()
+            if not delta.isNull():
+                for child in self.childItems():
+                    if isinstance(child, RectZoneItem):
+                        child.moveBy(-delta.x(), -delta.y())
             return new
         return super().itemChange(change, value)
 
@@ -573,7 +584,37 @@ class HallItem(QGraphicsRectItem):
             mw.halls.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.scene():
+            scene = self.scene()
+            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
+                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
+            for candidate in items:
+                if isinstance(candidate, (RectZoneItem, AnchorItem)):
+                    event.ignore()
+                    return
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event):
+        if self.scene():
+            scene = self.scene()
+            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
+                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
+            if items:
+                def item_area(it):
+                    br = it.boundingRect()
+                    return abs(br.width() * br.height())
+                def priority(it):
+                    if isinstance(it, AnchorItem):
+                        return 0
+                    if isinstance(it, RectZoneItem):
+                        return 1
+                    return 2
+                target = min(items, key=lambda it: (priority(it), item_area(it)))
+                if hasattr(target, "open_menu"):
+                    target.open_menu(event.screenPos())
+                    event.accept()
+                    return
         self.open_menu(event.screenPos())
         event.accept()
 
@@ -589,6 +630,12 @@ class AnchorItem(QGraphicsEllipseItem):
         self.setPen(QPen(QColor(255,0,0),2)); self.setBrush(QBrush(QColor(255,0,0)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
+
+    def update_zvalue(self):
+        hall = self.parentItem()
+        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
+        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
+        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -653,7 +700,37 @@ class AnchorItem(QGraphicsEllipseItem):
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.scene():
+            scene = self.scene()
+            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
+                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
+            for candidate in items:
+                if isinstance(candidate, (RectZoneItem, AnchorItem)):
+                    event.ignore()
+                    return
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event):
+        if self.scene():
+            scene = self.scene()
+            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
+                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
+            if items:
+                def item_area(it):
+                    br = it.boundingRect()
+                    return abs(br.width() * br.height())
+                def priority(it):
+                    if isinstance(it, AnchorItem):
+                        return 0
+                    if isinstance(it, RectZoneItem):
+                        return 1
+                    return 2
+                target = min(items, key=lambda it: (priority(it), item_area(it)))
+                if hasattr(target, "open_menu"):
+                    target.open_menu(event.screenPos())
+                    event.accept()
+                    return
         self.open_menu(event.screenPos())
         event.accept()
 
@@ -670,7 +747,14 @@ class RectZoneItem(QGraphicsRectItem):
         else:
             self.setPen(QPen(QColor(128,0,128),2)); self.setBrush(QBrush(QColor(128,0,128,50)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
-        self.setZValue(-w*h); self.tree_item = None
+        self.tree_item = None
+        self.update_zvalue()
+
+    def update_zvalue(self):
+        hall = self.parentItem()
+        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
+        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
+        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -721,6 +805,7 @@ class RectZoneItem(QGraphicsRectItem):
                 self.zone_num = values['zone_num']
                 self.zone_type = values['zone_type']
                 self.zone_angle = values['angle']
+                self.update_zvalue()
                 if self.zone_type in ("Входная зона", "Переходная"):
                     self.setPen(QPen(QColor(0,128,0),2))
                     self.setBrush(QBrush(QColor(0,128,0,50)))
@@ -737,6 +822,7 @@ class RectZoneItem(QGraphicsRectItem):
                 px = values['x'] * ppcm * 100
                 py = hall.rect().height() - values['y'] * ppcm * 100
                 self.setPos(QPointF(px, py))
+                self.update_zvalue()
                 audio_data = values['audio']
                 if audio_data:
                     hall.zone_audio_tracks[self.zone_num] = audio_data
@@ -775,10 +861,56 @@ class RectZoneItem(QGraphicsRectItem):
 # Custom view and scene
 # ---------------------------------------------------------------------------
 class MyGraphicsView(QGraphicsView):
+    def __init__(self, scene):
+        super().__init__(scene)
+        self._panning = False
+        self._pan_start = QPoint()
+        self.viewport().setCursor(Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        scene = self.scene()
+        mw = scene.mainwindow if scene else None
+        if event.button() in (Qt.LeftButton, Qt.MiddleButton):
+            should_pan = False
+            if event.button() == Qt.MiddleButton:
+                should_pan = True
+            elif event.button() == Qt.LeftButton:
+                if not (mw and mw.add_mode):
+                    point = event.position().toPoint()
+                    if self.itemAt(point) is None:
+                        should_pan = True
+            if should_pan:
+                self._panning = True
+                self._pan_start = event.position().toPoint()
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            pos = event.position().toPoint()
+            delta = pos - self._pan_start
+            self._pan_start = pos
+            hbar = self.horizontalScrollBar()
+            vbar = self.verticalScrollBar()
+            hbar.setValue(hbar.value() - delta.x())
+            vbar.setValue(vbar.value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        try: QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
-        except: pass
+        if self._panning and event.button() in (Qt.LeftButton, Qt.MiddleButton):
+            self._panning = False
+            self.viewport().setCursor(Qt.ArrowCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+        try:
+            QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
+        except:
+            pass
 
 class PlanGraphicsScene(QGraphicsScene):
     def __init__(self):
@@ -961,7 +1093,32 @@ class PlanGraphicsScene(QGraphicsScene):
         super().mouseReleaseEvent(event)
         try:
             mw.populate_tree()
-            if not self.selectedItems():
+            handled = False
+            if (event.button() == Qt.LeftButton and mw and not mw.add_mode):
+                down = event.buttonDownScenePos(Qt.LeftButton) if hasattr(event, "buttonDownScenePos") else pos
+                diff = pos - down
+                if abs(diff.x()) < 2 and abs(diff.y()) < 2:
+                    items_at = [it for it in self.items(pos, Qt.IntersectsItemShape)
+                                 if it.flags() & QGraphicsItem.ItemIsSelectable]
+                    if items_at:
+                        def item_area(it):
+                            if isinstance(it, QGraphicsRectItem):
+                                rect = it.rect()
+                                return abs(rect.width()*rect.height())
+                            br = it.boundingRect()
+                            return abs(br.width()*br.height())
+                        def priority(it):
+                            return 0 if isinstance(it, (AnchorItem, RectZoneItem)) else 1
+                        chosen = min(items_at, key=lambda it: (item_area(it), priority(it)))
+                        if not (event.modifiers() & Qt.ControlModifier):
+                            for selected in list(self.selectedItems()):
+                                if selected is not chosen:
+                                    selected.setSelected(False)
+                        chosen.setSelected(True)
+                        mw.last_selected_items = list(self.selectedItems()) or [chosen]
+                        mw.on_scene_selection_changed()
+                        handled = True
+            if not handled and not self.selectedItems():
                 clicked = self.itemAt(pos, self.views()[0].transform())
                 if clicked:
                     clicked.setSelected(True)
@@ -1026,7 +1183,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.current_project_file = None
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.view.setDragMode(QGraphicsView.RubberBandDrag)
+        self.view.setDragMode(QGraphicsView.NoDrag)
         self.view.wheelEvent = self.handle_wheel_event
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
@@ -1501,3 +1658,6 @@ if __name__ == "__main__":
     window = PlanEditorMainWindow()
     window.show()
     sys.exit(app.exec())
+
+
+
