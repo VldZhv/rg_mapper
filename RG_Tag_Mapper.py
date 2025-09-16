@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize
+    QPdfWriter, QPageSize, QCursor
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer
+from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
@@ -173,14 +173,16 @@ class HallItem(QGraphicsRectItem):
             return new
         return super().itemChange(change, value)
 
-    def mouseDoubleClickEvent(self, event):
+    # Unified menu
+    def open_menu(self, global_pos: QPoint):
+        if not self.scene(): return
         mw = self.scene().mainwindow
         ppcm = self.scene().pixel_per_cm_x
         menu = QMenu()
         header = menu.addAction(f"Зал {self.number}"); header.setEnabled(False)
         edit = menu.addAction("Редактировать зал")
         delete = menu.addAction("Удалить зал")
-        act = menu.exec(event.screenPos())
+        act = menu.exec(global_pos)
         if act == edit:
             # current dims in meters
             w_m = self.rect().width()/(ppcm*100)
@@ -188,7 +190,6 @@ class HallItem(QGraphicsRectItem):
             params = getHallParameters(self.number, self.name, w_m, h_m, self.scene())
             if params:
                 new_num, new_name, new_w_m, new_h_m = params
-                # update anchors references if number changed
                 old = self.number
                 for a in mw.anchors:
                     if a.main_hall_number == old:
@@ -200,7 +201,6 @@ class HallItem(QGraphicsRectItem):
                 h_px = new_h_m * ppcm * 100
                 self.prepareGeometryChange()
                 self.setRect(0, 0, w_px, h_px)
-                # adjust z-value so stacking remains by area
                 self.setZValue(-w_px*h_px)
                 mw.last_selected_items = []; mw.populate_tree()
         elif act == delete:
@@ -225,6 +225,9 @@ class HallItem(QGraphicsRectItem):
                     a.extra_halls.remove(self.number)
             mw.halls.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+
+    def mouseDoubleClickEvent(self, event):
+        self.open_menu(event.screenPos())
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -261,7 +264,8 @@ class AnchorItem(QGraphicsEllipseItem):
             return new
         return super().itemChange(change, value)
 
-    def mouseDoubleClickEvent(self, event):
+    def open_menu(self, global_pos: QPoint):
+        if not self.scene(): return
         mw = self.scene().mainwindow
         hall = next((h for h in mw.halls if h.number==self.main_hall_number), None)
         if not hall: return
@@ -272,10 +276,11 @@ class AnchorItem(QGraphicsEllipseItem):
         z_m = round(self.z/100.0,1)
         ids = [str(self.main_hall_number)] + [str(x) for x in self.extra_halls]
         halls_str = ("зал "+ids[0] if len(ids)==1 else "залы "+",".join(ids))
+
         menu = QMenu()
         header = menu.addAction(f"Якорь {self.number} ({halls_str})"); header.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
-        act = menu.exec(event.screenPos())
+        act = menu.exec(global_pos)
         if act == edit:
             fields = [
                 {"label": "Номер якоря", "type": "int", "default": self.number, "min": 0, "max": 10000},
@@ -300,6 +305,9 @@ class AnchorItem(QGraphicsEllipseItem):
         elif act == delete:
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+
+    def mouseDoubleClickEvent(self, event):
+        self.open_menu(event.screenPos())
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -344,22 +352,17 @@ class RectZoneItem(QGraphicsRectItem):
             "angle": fix_negative_zero(round(self.zone_angle,1))
         }
 
-    def mouseDoubleClickEvent(self, event):
-        scene = self.scene(); mw = scene.mainwindow
-        zlist = [z for z in scene.items(event.scenePos())
-                 if isinstance(z,RectZoneItem) and z.contains(z.mapFromScene(event.scenePos()))]
-        if zlist:
-            smaller = [z for z in zlist if z is not self and (z.rect().width()*z.rect().height() < self.rect().width()*self.rect().height())]
-            if smaller:
-                min(smaller, key=lambda z: z.rect().width()*z.rect().height()).mouseDoubleClickEvent(event)
-                return
+    def open_menu(self, global_pos: QPoint):
+        scene = self.scene(); 
+        if not scene: return
+        mw = scene.mainwindow
         data = self.get_export_data()
         if data is None: return
         x_m, y_m, w_m, h_m, angle = data["x"], data["y"], data["w"], data["h"], data["angle"]
         menu = QMenu()
         header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()})"); header.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
-        act = menu.exec(event.screenPos())
+        act = menu.exec(global_pos)
         if act == edit:
             fields = [
                 {"label": "Номер зоны", "type": "int", "default": self.zone_num, "min": 0, "max": 10000},
@@ -391,6 +394,19 @@ class RectZoneItem(QGraphicsRectItem):
         elif act == delete:
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+
+    def mouseDoubleClickEvent(self, event):
+        scene = self.scene()
+        if scene:
+            # выбрать меньшую, если наложены
+            zlist = [z for z in scene.items(event.scenePos())
+                     if isinstance(z,RectZoneItem) and z.contains(z.mapFromScene(event.scenePos()))]
+            if zlist:
+                smaller = [z for z in zlist if z is not self and (z.rect().width()*z.rect().height() < self.rect().width()*self.rect().height())]
+                if smaller:
+                    min(smaller, key=lambda z: z.rect().width()*z.rect().height()).open_menu(event.screenPos())
+                    event.accept(); return
+        self.open_menu(event.screenPos())
         event.accept()
 
 # ---------------------------------------------------------------------------
@@ -606,6 +622,10 @@ class PlanEditorMainWindow(QMainWindow):
         self.setCentralWidget(self.view)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("Объекты"); self.tree.setWordWrap(True)
+        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
+        self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
+
         dock = QDockWidget("Список объектов", self); dock.setWidget(self.tree)
         dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -727,6 +747,40 @@ class PlanEditorMainWindow(QMainWindow):
                 if hasattr(it, 'tree_item') and it.tree_item:
                     it.tree_item.setSelected(True)
 
+    # Tree context/double click handlers
+    def on_tree_context_menu(self, point: QPoint):
+        item = self.tree.itemAt(point)
+        if not item: return
+        self.handle_tree_item_action(item, self.tree.viewport().mapToGlobal(point))
+
+    def on_tree_item_double_clicked(self, item: QTreeWidgetItem, col: int):
+        self.handle_tree_item_action(item, QCursor.pos())
+
+    def handle_tree_item_action(self, item: QTreeWidgetItem, global_pos: QPoint):
+        data = item.data(0, Qt.UserRole)
+        if not data: return
+        tp = data.get("type")
+        if tp == "hall":
+            hall = data["ref"]
+            if hall and hall.scene(): hall.open_menu(global_pos)
+        elif tp == "anchor":
+            anchor = data["ref"]
+            if anchor and anchor.scene(): anchor.open_menu(global_pos)
+        elif tp == "zone_group":
+            zones = data["ref"]  # list of RectZoneItem
+            zones = [z for z in zones if z.scene() is not None]
+            if not zones: return
+            if len(zones) == 1:
+                zones[0].open_menu(global_pos)
+                return
+            # submenu to choose which zone in group
+            menu = QMenu()
+            for z in zones:
+                label = f'Зона {z.zone_num} ({z.get_display_type()})'
+                act = menu.addAction(label)
+                act.triggered.connect(lambda checked=False, z=z: z.open_menu(global_pos))
+            menu.exec(global_pos)
+
     # Misc
     def handle_wheel_event(self, event):
         factor = 1.2 if event.angleDelta().y()>0 else 1/1.2
@@ -744,12 +798,16 @@ class PlanEditorMainWindow(QMainWindow):
     def populate_tree(self):
         self.last_selected_items = []
         self.tree.clear()
+        # halls
         for h in self.halls:
             wm = h.rect().width()/(self.scene.pixel_per_cm_x*100)
             hm = h.rect().height()/(self.scene.pixel_per_cm_x*100)
             rt = (f'Зал {h.number} "{h.name}" ({wm:.1f} x {hm:.1f} м)'
                   if h.name.strip() else f'Зал {h.number} ({wm:.1f} x {hm:.1f} м)')
             hi = QTreeWidgetItem([rt]); h.tree_item = hi; self.tree.addTopLevelItem(hi)
+            hi.setData(0, Qt.UserRole, {"type":"hall","ref":h})
+
+            # anchors under hall
             for a in self.anchors:
                 if a.main_hall_number==h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
@@ -757,29 +815,36 @@ class PlanEditorMainWindow(QMainWindow):
                     ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
                     at = f'Якорь {a.number} (x={xm} м, y={ym} м, z={fix_negative_zero(round(a.z/100,1))} м)'
                     ai = QTreeWidgetItem([at]); a.tree_item = ai; hi.addChild(ai)
-            zones = {}
-            default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
+                    ai.setData(0, Qt.UserRole, {"type":"anchor","ref":a})
+
+            # zones grouped by num
+            zones_by_num = {}
             for ch in h.childItems():
                 if isinstance(ch,RectZoneItem):
-                    n = ch.zone_num
-                    if n not in zones:
-                        zones[n] = {"num":n, "enter":default.copy(), "exit":default.copy()}
-                    if ch.zone_type in ("Входная зона","Переходная"):
-                        zones[n]["enter"] = ch.get_export_data()
-                    if ch.zone_type == "Выходная зона":
-                        zones[n]["exit"] = ch.get_export_data()
-                    if ch.zone_type == "Переходная":
-                        zones[n]["bound"] = True
-            for z in zones.values():
-                zt = (f"Зона {z['num']}: enter: x = {z['enter']['x']} м, y = {z['enter']['y']} м, "
-                      f"w = {z['enter']['w']} м, h = {z['enter']['h']} м, angle = {z['enter']['angle']}°; "
-                      f"exit: x = {z['exit']['x']} м, y = {z['exit']['y']} м, "
-                      f"w = {z['exit']['w']} м, h = {z['exit']['h']} м, angle = {z['exit']['angle']}°")
-                zi = QTreeWidgetItem([zt])
-                for ch in h.childItems():
-                    if isinstance(ch,RectZoneItem) and ch.zone_num==z['num']:
-                        ch.tree_item = zi
-                hi.addChild(zi)
+                    zones_by_num.setdefault(ch.zone_num, []).append(ch)
+
+            for num, zlist in zones_by_num.items():
+                # compose one-line text as before
+                default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
+                enter = default.copy(); exitz = default.copy(); bound = False
+                for z in zlist:
+                    data = z.get_export_data()
+                    if z.zone_type in ("Входная зона","Переходная"):
+                        enter = data
+                    if z.zone_type == "Выходная зона":
+                        exitz = data
+                    if z.zone_type == "Переходная":
+                        bound = True
+                zt = (f"Зона {num}: enter: x = {enter['x']} м, y = {enter['y']} м, "
+                      f"w = {enter['w']} м, h = {enter['h']} м, angle = {enter['angle']}°; "
+                      f"exit: x = {exitz['x']} м, y = {exitz['y']} м, "
+                      f"w = {exitz['w']} м, h = {exitz['h']} м, angle = {exitz['angle']}°")
+                zi = QTreeWidgetItem([zt]); hi.addChild(zi)
+                # link every zone to the same item? Keep mapping via UserRole
+                zi.setData(0, Qt.UserRole, {"type":"zone_group","ref":zlist})
+                # also set back-reference for sync highlighting (any zone in this group will highlight this row)
+                for z in zlist: z.tree_item = zi
+
             hi.setExpanded(True)
 
     def set_mode(self, mode):
@@ -914,98 +979,65 @@ class PlanEditorMainWindow(QMainWindow):
     def export_config(self):
         fp,_ = QFileDialog.getSaveFileName(self,"Экспорт JSON","","*.json")
         if not fp: return
-
-        config = {"rooms": []}
+        config = {"rooms":[]}
         for h in self.halls:
-            # compute hall size in meters
-            w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
-            h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
-
-            room = {
-                "num": h.number,
-                "width": w_m,
-                "height": h_m,
-                "anchors": [],
-                "zones": []
-            }
-
-            # anchors
+            room = {"num":h.number, "anchors":[], "zones":[]}
             for a in self.anchors:
-                if a.main_hall_number == h.number or h.number in a.extra_halls:
+                if a.main_hall_number==h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
-                    xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
-                    ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
-                    ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z/100, 1))}
-                    if a.bound:
-                        ae["bound"] = True
+                    xm = fix_negative_zero(round(lp.x()/(self.scene.pixel_per_cm_x*100),1))
+                    ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
+                    ae = {"id":a.number, "x":xm, "y":ym, "z":fix_negative_zero(round(a.z/100,1))}
+                    if a.bound: ae["bound"]=True
                     room["anchors"].append(ae)
-
-            # zones
             zones = {}
-            default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
+            default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
             for ch in h.childItems():
-                if isinstance(ch, RectZoneItem):
+                if isinstance(ch,RectZoneItem):
                     n = ch.zone_num
                     if n not in zones:
-                        zones[n] = {"num": n, "enter": default.copy(), "exit": default.copy()}
+                        zones[n] = {"num":n, "enter":default.copy(), "exit":default.copy()}
                     dz = ch.get_export_data()
-                    if ch.zone_type == "Входная зона":
+                    if ch.zone_type=="Входная зона":
                         zones[n]["enter"] = dz
-                    elif ch.zone_type == "Выходная зона":
+                    elif ch.zone_type=="Выходная зона":
                         zones[n]["exit"] = dz
-                    elif ch.zone_type == "Переходная":
-                        zones[n]["enter"] = dz
-                        zones[n]["bound"] = True
-
+                    elif ch.zone_type=="Переходная":
+                        zones[n]["enter"]=dz; zones[n]["bound"]=True
             for z in zones.values():
                 room["zones"].append(z)
-
             config["rooms"].append(room)
 
-        # build nicely formatted JSON text including width/height
-        result = '{\n  "rooms": [\n'
+        result = '{\n"rooms": [\n'
         room_strs = []
         for room in config["rooms"]:
-            lines = [
-                "    {",
-                f'      "num": {room["num"]},',
-                f'      "width": {room["width"]},',
-                f'      "height": {room["height"]},',
-                f'      "anchors": ['
-            ]
+            lines = ['{', f'"num": {room["num"]},', '"anchors": [']
             alines = []
             for a in room["anchors"]:
-                s = f'        {{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
-                if a.get("bound"):
-                    s += ', "bound": true'
-                s += " }"
-                alines.append(s)
-            lines.append(",\n".join(alines))
-            lines.append("      ],")
-            lines.append('      "zones": [')
+                s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
+                if a.get("bound"): s += ', "bound": true'
+                s += ' }'; alines.append(s)
+            lines.append(",\n".join(alines)); lines.append('],'); lines.append('"zones": [')
             zlines = []
             for z in room["zones"]:
-                zl = "        {"
-                zl += f'\n          "num": {z["num"]},'
-                zl += f'\n          "enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, "w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, "angle": {z["enter"]["angle"]} }},'
-                zl += f'\n          "exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, "w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, "angle": {z["exit"]["angle"]} }}'
-                if z.get("bound"):
-                    zl += ',\n          "bound": true'
-                zl += "\n        }"
-                zlines.append(zl)
-            lines.append(",\n".join(zlines))
-            lines.append("      ]")
-            lines.append("    }")
+                zl = '{'
+                zl += f'\n"num": {z["num"]},'
+                zl += (f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
+                       f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
+                       f'"angle": {z["enter"]["angle"]} }},')
+                zl += (f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
+                       f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
+                       f'"angle": {z["exit"]["angle"]} }}')
+                if z.get("bound"): zl += ',\n"bound": true'
+                zl += '\n}'; zlines.append(zl)
+            lines.append(",\n".join(zlines)); lines.append(']'); lines.append('}')
             room_strs.append("\n".join(lines))
-        result += ",\n".join(room_strs)
-        result += '\n  ]\n}'
-
+        result += ",\n".join(room_strs) + '\n]\n}'
         try:
-            with open(fp, "w", encoding="utf-8") as f:
-                f.write(result)
-            QMessageBox.information(self, "Экспорт", "Экспорт завершён.")
+            with open(fp,"w",encoding="utf-8") as f: f.write(result)
+            QMessageBox.information(self,"Экспорт","Экспорт завершён.")
         except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+            QMessageBox.critical(self,"Ошибка",f"Не удалось экспортировать:\n{e}")
 
     def closeEvent(self, event):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
