@@ -1,4 +1,5 @@
-﻿import sys, math, json, base64, os
+﻿# RG_Tag_Mapper.py — fixed context menus and anchor priority
+import sys, math, json, base64, os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -494,12 +495,6 @@ class HallItem(QGraphicsRectItem):
         self.audio_settings = None
         self.zone_audio_tracks = {}
 
-    def update_zvalue(self):
-        hall = self.parentItem()
-        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
-        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
-        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
-
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
         painter.save()
@@ -586,35 +581,44 @@ class HallItem(QGraphicsRectItem):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.scene():
-            scene = self.scene()
-            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
-                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
-            for candidate in items:
-                if isinstance(candidate, (RectZoneItem, AnchorItem)):
-                    event.ignore()
-                    return
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                event.ignore()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                event.ignore()
+                return
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         if self.scene():
-            scene = self.scene()
-            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
-                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
-            if items:
-                def item_area(it):
-                    br = it.boundingRect()
-                    return abs(br.width() * br.height())
-                def priority(it):
-                    if isinstance(it, AnchorItem):
-                        return 0
-                    if isinstance(it, RectZoneItem):
-                        return 1
-                    return 2
-                target = min(items, key=lambda it: (priority(it), item_area(it)))
-                if hasattr(target, "open_menu"):
-                    target.open_menu(event.screenPos())
-                    event.accept()
-                    return
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                zone.open_menu(event.screenPos())
+                event.accept()
+                return
+        self.open_menu(event.screenPos())
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        # ПКМ: приоритет — якорь, затем (внутренняя) зона, затем зал
+        if self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                zone.open_menu(event.screenPos())
+                event.accept()
+                return
         self.open_menu(event.screenPos())
         event.accept()
 
@@ -630,12 +634,11 @@ class AnchorItem(QGraphicsEllipseItem):
         self.setPen(QPen(QColor(255,0,0),2)); self.setBrush(QBrush(QColor(255,0,0)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
+        self.update_zvalue()
 
     def update_zvalue(self):
-        hall = self.parentItem()
-        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
-        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
-        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
+        anchor_number = float(self.number) if isinstance(self.number, (int, float)) else 0.0
+        self.setZValue(10000.0 + anchor_number * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -656,7 +659,42 @@ class AnchorItem(QGraphicsEllipseItem):
                 new.setX(round(new.x()/step)*step)
                 new.setY(round(new.y()/step)*step)
             return new
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            self.update_zvalue()
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.update_zvalue()
+            scene = self.scene()
+            if scene and not (event.modifiers() & Qt.ControlModifier):
+                scene.clearSelection()
+            self.setSelected(True)
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            self.update_zvalue()
+        super().mouseMoveEvent(event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.update_zvalue()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        # Всегда открываем меню якоря при двойном клике по якорю
+        self.update_zvalue()
+        self.open_menu(event.screenPos())
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        # ПКМ на якоре — его же меню, даже если он перекрыт другими
+        self.update_zvalue()
+        self.open_menu(event.screenPos())
+        event.accept()
 
     def open_menu(self, global_pos: QPoint):
         if not self.scene(): return
@@ -695,44 +733,11 @@ class AnchorItem(QGraphicsEllipseItem):
                 px = x2 * ppcm * 100
                 py = hall.rect().height() - y2 * ppcm * 100
                 self.setPos(hall.mapToScene(QPointF(px, py)))
+                self.update_zvalue()
                 mw.last_selected_items = []; mw.populate_tree()
         elif act == delete:
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self.scene():
-            scene = self.scene()
-            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
-                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
-            for candidate in items:
-                if isinstance(candidate, (RectZoneItem, AnchorItem)):
-                    event.ignore()
-                    return
-        super().mousePressEvent(event)
-
-    def mouseDoubleClickEvent(self, event):
-        if self.scene():
-            scene = self.scene()
-            items = [it for it in scene.items(event.scenePos(), Qt.ContainsItemShape)
-                     if it is not self and (it.flags() & QGraphicsItem.ItemIsSelectable)]
-            if items:
-                def item_area(it):
-                    br = it.boundingRect()
-                    return abs(br.width() * br.height())
-                def priority(it):
-                    if isinstance(it, AnchorItem):
-                        return 0
-                    if isinstance(it, RectZoneItem):
-                        return 1
-                    return 2
-                target = min(items, key=lambda it: (priority(it), item_area(it)))
-                if hasattr(target, "open_menu"):
-                    target.open_menu(event.screenPos())
-                    event.accept()
-                    return
-        self.open_menu(event.screenPos())
-        event.accept()
 
 # ---------------------------------------------------------------------------
 # ZoneItem
@@ -752,9 +757,9 @@ class RectZoneItem(QGraphicsRectItem):
 
     def update_zvalue(self):
         hall = self.parentItem()
-        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, "number") else 0
+        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, 'number') else 0
         zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
-        self.setZValue(1000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
+        self.setZValue(5000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -843,19 +848,80 @@ class RectZoneItem(QGraphicsRectItem):
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                event.ignore()
+                return
+            smaller = _smallest_zone(self.scene(), event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                event.ignore()
+                return
+        super().mousePressEvent(event)
+
     def mouseDoubleClickEvent(self, event):
         scene = self.scene()
         if scene:
-            # выбрать меньшую, если наложены
-            zlist = [z for z in scene.items(event.scenePos())
-                     if isinstance(z,RectZoneItem) and z.contains(z.mapFromScene(event.scenePos()))]
-            if zlist:
-                smaller = [z for z in zlist if z is not self and (z.rect().width()*z.rect().height() < self.rect().width()*self.rect().height())]
-                if smaller:
-                    min(smaller, key=lambda z: z.rect().width()*z.rect().height()).open_menu(event.screenPos())
-                    event.accept(); return
+            anchor = _top_anchor(scene, event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            smaller = _smallest_zone(scene, event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                smaller.open_menu(event.screenPos())
+                event.accept()
+                return
         self.open_menu(event.screenPos())
         event.accept()
+
+    def contextMenuEvent(self, event):
+        # ПКМ: приоритет — якорь → меньшая зона → текущая зона
+        scene = self.scene()
+        if scene:
+            anchor = _top_anchor(scene, event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            smaller = _smallest_zone(scene, event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                smaller.open_menu(event.screenPos())
+                event.accept()
+                return
+        self.open_menu(event.screenPos())
+        event.accept()
+
+
+def _zone_area(zone):
+    rect = zone.boundingRect()
+    return abs(rect.width() * rect.height())
+
+def _top_anchor(scene, pos):
+    if scene is None:
+        return None
+    # Точное попадание по форме якоря; возьмем верхний по Z
+    for item in scene.items(pos, Qt.ContainsItemShape):
+        if isinstance(item, AnchorItem):
+            return item
+    return None
+
+def _smallest_zone(scene, pos, exclude=None, max_area=None):
+    if scene is None:
+        return None
+    best = None
+    best_area = None
+    for item in scene.items(pos, Qt.IntersectsItemShape):
+        if isinstance(item, RectZoneItem) and item is not exclude:
+            rect = item.boundingRect()
+            area = abs(rect.width() * rect.height())
+            if max_area is not None and area >= max_area:
+                continue
+            if best is None or area < best_area:
+                best = item
+                best_area = area
+    return best
 
 # ---------------------------------------------------------------------------
 # Custom view and scene
@@ -1654,10 +1720,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.view.setScene(None); event.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    app = QApplication(os.getenv("QT_FORCE_STDERR_LOGGING") and sys.argv or sys.argv)
     window = PlanEditorMainWindow()
     window.show()
     sys.exit(app.exec())
-
-
-
