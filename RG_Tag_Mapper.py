@@ -6,13 +6,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox
+    QGroupBox, QWidgetAction, QToolButton
 )
 from PySide6.QtGui import (
-    QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor
+    QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
+    QPdfWriter, QPageSize, QCursor, QIcon
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
+from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
 from mutagen.mp3 import MP3
 
@@ -1218,29 +1218,68 @@ class PlanEditorMainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
         toolbar = QToolBar("Инструменты", self); self.addToolBar(toolbar)
-        act_open = QAction("Открыть изображение", self)
-        act_cal = QAction("Выполнить калибровку", self)
-        toolbar.addAction(act_open); toolbar.addAction(act_cal); toolbar.addSeparator()
-        act_save = QAction("Сохранить проект", self); act_load = QAction("Загрузить проект", self)
-        toolbar.addAction(act_save); toolbar.addAction(act_load); toolbar.addSeparator()
-        act_add_hall = QAction("Добавить зал", self)
-        act_add_anchor = QAction("Добавить якорь", self)
-        act_add_zone = QAction("Добавить зону", self)
-        toolbar.addAction(act_add_hall); toolbar.addAction(act_add_anchor); toolbar.addAction(act_add_zone)
-        self.act_lock = QAction("Закрепить объекты", self); toolbar.addAction(self.act_lock); toolbar.addSeparator()
-        act_export = QAction("Экспорт конфигурации", self); toolbar.addAction(act_export)
-        act_pdf = QAction("Сохранить в PDF", self); toolbar.addAction(act_pdf)
+        toolbar.setStyleSheet(
+            """
+            QToolBar {
+                background-color: #2c313c;
+            }
+            QToolButton {
+                background-color: #3c414d;
+                color: #f0f0f0;
+                border: 1px solid #2a2f38;
+                border-radius: 8px;
+                padding: 6px 10px;
+                min-width: 110px;
+                min-height: 72px;
+            }
+            QToolButton:hover {
+                background-color: #4b5160;
+            }
+            QToolButton:pressed {
+                background-color: #5a6070;
+            }
+            """
+        )
+        toolbar.setContentsMargins(12, 6, 12, 6)
+        if toolbar.layout():
+            toolbar.layout().setSpacing(10)
 
-        act_open.triggered.connect(self.open_image)
-        act_cal.triggered.connect(self.perform_calibration)
-        act_save.triggered.connect(self.save_project)
-        act_load.triggered.connect(self.load_project)
-        act_export.triggered.connect(self.export_config)
-        act_pdf.triggered.connect(self.save_to_pdf)
-        act_add_hall.triggered.connect(lambda: self.set_mode("hall"))
-        act_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
-        act_add_zone.triggered.connect(lambda: self.set_mode("zone"))
-        self.act_lock.triggered.connect(self.lock_objects)
+        def create_toolbar_button(text, icon_path, slot):
+            button = QToolButton(toolbar)
+            button.setText(text)
+            if icon_path:
+                icon = QIcon(icon_path)
+                if not icon.isNull():
+                    button.setIcon(icon)
+            button.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            button.setIconSize(QSize(32, 32))
+            button.setCheckable(False)
+            button.setCursor(Qt.PointingHandCursor)
+            button.clicked.connect(slot)
+            button.setAutoRaise(False)
+            button.setFocusPolicy(Qt.NoFocus)
+            return button
+
+        def add_toolbar_widget(text, slot, icon_path=None):
+            widget_action = QWidgetAction(self)
+            button = create_toolbar_button(text, icon_path, slot)
+            widget_action.setDefaultWidget(button)
+            toolbar.addAction(widget_action)
+            return widget_action, button
+
+        self.act_open_action, self.act_open_button = add_toolbar_widget("Открыть изображение", self.open_image)
+        self.act_cal_action, self.act_cal_button = add_toolbar_widget("Выполнить калибровку", self.perform_calibration)
+        toolbar.addSeparator()
+        self.act_save_action, self.act_save_button = add_toolbar_widget("Сохранить проект", self.save_project)
+        self.act_load_action, self.act_load_button = add_toolbar_widget("Загрузить проект", self.load_project)
+        toolbar.addSeparator()
+        self.act_add_hall_action, self.act_add_hall_button = add_toolbar_widget("Добавить зал", lambda: self.set_mode("hall"))
+        self.act_add_anchor_action, self.act_add_anchor_button = add_toolbar_widget("Добавить якорь", lambda: self.set_mode("anchor"))
+        self.act_add_zone_action, self.act_add_zone_button = add_toolbar_widget("Добавить зону", lambda: self.set_mode("zone"))
+        self.act_lock_action, self.act_lock_button = add_toolbar_widget("Закрепить объекты", self.lock_objects)
+        toolbar.addSeparator()
+        self.act_export_action, self.act_export_button = add_toolbar_widget("Экспорт конфигурации", self.export_config)
+        self.act_pdf_action, self.act_pdf_button = add_toolbar_widget("Сохранить в PDF", self.save_to_pdf)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
