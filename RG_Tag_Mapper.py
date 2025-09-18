@@ -1,4 +1,4 @@
-﻿# RG_Tag_Mapper.py — fixed context menus and anchor priority
+﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
 import sys, math, json, base64, os
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -320,10 +320,11 @@ def getHallParameters(default_num=1, default_name="", default_w=1.0, default_h=1
         return v["Номер зала"], v["Название зала"], v["Ширина (м)"], v["Высота (м)"]
     return None
 
-def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_bound=False):
+# Z ВВОДИМ В МЕТРАХ
+def getAnchorParameters(default_num=1, default_z_m=0.0, default_extras="", default_bound=False):
     fields = [
         {"label": "Номер якоря", "type": "int", "default": default_num, "min": 0, "max": 10000},
-        {"label": "Координата Z (см)", "type": "int", "default": default_z, "min": -10000, "max": 10000},
+        {"label": "Координата Z (м)", "type": "float", "default": default_z_m, "min": -100.0, "max": 100.0, "decimals": 1},
         {"label": "Дополнительные залы (через запятую)", "type": "string", "default": default_extras},
         {"label": "Переходный", "type": "bool", "default": default_bound}
     ]
@@ -331,7 +332,7 @@ def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_b
     if dlg.exec() == QDialog.Accepted:
         v = dlg.getValues()
         extras = [int(tok) for tok in v["Дополнительные залы (через запятую)"].split(",") if tok.strip().isdigit()]
-        return v["Номер якоря"], v["Координата Z (см)"], extras, v["Переходный"]
+        return v["Номер якоря"], float(v["Координата Z (м)"]), extras, v["Переходный"]
     return None
 
 def getZoneParameters(default_num=1, default_type="Входная зона", default_angle=0):
@@ -1070,9 +1071,10 @@ class PlanGraphicsScene(QGraphicsScene):
                 params = mw.get_anchor_parameters()
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
-                num, z, extras, bound = params
+                num, z_m, extras, bound = params  # z в метрах
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
-                a.z, a.extra_halls, a.bound = z, extras, bound
+                a.z = int(round(z_m * 100))       # храним в см
+                a.extra_halls, a.bound = extras, bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
                 return
@@ -1257,7 +1259,7 @@ class PlanEditorMainWindow(QMainWindow):
     # Parameter getters...
     def get_anchor_parameters(self):
         default = 1 if not self.anchors else max(a.number for a in self.anchors)+1
-        return getAnchorParameters(default, 0, "", False)
+        return getAnchorParameters(default, 0.0, "", False)  # Z по умолчанию в метрах
     def get_zone_parameters(self):
         default = 1
         if self.current_hall_for_zone:
@@ -1576,25 +1578,41 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().clearMessage()
 
     def export_config(self):
-        fp,_ = QFileDialog.getSaveFileName(self,"Экспорт JSON","","*.json")
-        if not fp: return
-        config = {"rooms":[]}
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", "", "*.json")
+        if not fp:
+            return
+
+        config = {"rooms": []}
         audio_files_map = {}
         track_entries = []
 
+        # === helpers ===
+        def _bytes_from_b64(b64str: str) -> int:
+            if not b64str:
+                return 0
+            try:
+                return len(base64.b64decode(b64str.encode("ascii")))
+            except Exception:
+                return 0
+
         def collect_audio_files(info):
+            """Собираем ИМЕНА и РАЗМЕРЫ (в байтах) аудиофайлов для tracks.json."""
             if not info:
                 return
             name = info.get("filename")
             if name:
-                audio_files_map[name] = int(info.get("duration_ms", 0))
+                size_bytes = _bytes_from_b64(info.get("data", ""))
+                audio_files_map[name] = max(size_bytes, audio_files_map.get(name, 0))
+
             secondary = info.get("secondary")
             if isinstance(secondary, dict):
                 sec_name = secondary.get("filename")
                 if sec_name:
-                    audio_files_map[sec_name] = int(secondary.get("duration_ms", 0))
+                    size_bytes2 = _bytes_from_b64(secondary.get("data", ""))
+                    audio_files_map[sec_name] = max(size_bytes2, audio_files_map.get(sec_name, 0))
 
         def create_track_entry(info, room_id, is_hall):
+            """Структура трека; 'multi_id' добавляем ТОЛЬКО при наличии доп. ID."""
             if not info:
                 return None
             filename = info.get("filename")
@@ -1602,56 +1620,82 @@ class PlanEditorMainWindow(QMainWindow):
                 return None
             base_id = extract_track_id(filename)
             extras = [i for i in info.get("extra_ids", []) if isinstance(i, int)]
-            multi = []
-            seen = set()
-            for mid in [base_id] + extras:
-                if mid in seen:
-                    continue
-                multi.append(mid)
-                seen.add(mid)
+
             entry = {
                 "audio": filename,
                 "hall": is_hall,
                 "id": base_id,
-                "multi_id": multi,
                 "name": "",
                 "play_once": bool(info.get("play_once", False)),
                 "reset": bool(info.get("reset", False)),
                 "room_id": room_id,
                 "term": bool(info.get("interruptible", True))
             }
+
+            # только если есть хотя бы один дополнительный id
+            if extras:
+                seen = set()
+                merged = []
+                for mid in [base_id] + extras:
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    merged.append(mid)
+                entry["multi_id"] = merged
+
             secondary = info.get("secondary")
             if isinstance(secondary, dict) and secondary.get("filename"):
                 entry["audio2"] = secondary["filename"]
             return entry
 
+        # === rooms.json ===
         for h in self.halls:
-            room = {"num":h.number, "anchors":[], "zones":[]}
+            # ширина/высота зала в метрах
+            w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
+            h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
+
+            room = {
+                "num": h.number,
+                "width": w_m,
+                "height": h_m,
+                "anchors": [],
+                "zones": []
+            }
+
+            # anchors
             for a in self.anchors:
-                if a.main_hall_number==h.number or h.number in a.extra_halls:
+                if a.main_hall_number == h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
-                    xm = fix_negative_zero(round(lp.x()/(self.scene.pixel_per_cm_x*100),1))
-                    ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
-                    ae = {"id":a.number, "x":xm, "y":ym, "z":fix_negative_zero(round(a.z/100,1))}
-                    if a.bound: ae["bound"]=True
+                    xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
+                    ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
+                    ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
+                    if a.bound:
+                        ae["bound"] = True
                     room["anchors"].append(ae)
+
+            # zones
             zones = {}
-            default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
+            default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for ch in h.childItems():
-                if isinstance(ch,RectZoneItem):
+                if isinstance(ch, RectZoneItem):
                     n = ch.zone_num
                     if n not in zones:
-                        zones[n] = {"num":n, "enter":default.copy(), "exit":default.copy()}
+                        zones[n] = {"num": n, "enter": default.copy(), "exit": default.copy()}
                     dz = ch.get_export_data()
-                    if ch.zone_type=="Входная зона":
+                    if ch.zone_type == "Входная зона":
                         zones[n]["enter"] = dz
-                    elif ch.zone_type=="Выходная зона":
+                    elif ch.zone_type == "Выходная зона":
                         zones[n]["exit"] = dz
-                    elif ch.zone_type=="Переходная":
-                        zones[n]["enter"]=dz; zones[n]["bound"]=True
+                    elif ch.zone_type == "Переходная":
+                        zones[n]["enter"] = dz
+                        zones[n]["bound"] = True
+
             for z in zones.values():
                 room["zones"].append(z)
+
             config["rooms"].append(room)
+
+            # аудио для tracks.json (sizes в байтах)
             if h.audio_settings:
                 collect_audio_files(h.audio_settings)
                 entry = create_track_entry(h.audio_settings, h.number, True)
@@ -1665,31 +1709,52 @@ class PlanEditorMainWindow(QMainWindow):
                 if entry:
                     track_entries.append(entry)
 
-        result = '{\n"rooms": [\n'
-        room_strs = []
+        # Сохраняем rooms.json (как текст для читабельности)
+        rooms_strs = []
         for room in config["rooms"]:
-            lines = ['{', f'"num": {room["num"]},', '"anchors": [']
+            lines = [
+                "{",
+                f'"num": {room["num"]},',
+                f'"width": {room["width"]},',
+                f'"height": {room["height"]},',
+                '"anchors": ['
+            ]
             alines = []
             for a in room["anchors"]:
                 s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
-                if a.get("bound"): s += ', "bound": true'
-                s += ' }'; alines.append(s)
-            lines.append(",\n".join(alines)); lines.append('],'); lines.append('"zones": [')
+                if a.get("bound"):
+                    s += ', "bound": true'
+                s += " }"
+                alines.append(s)
+            lines.append(",\n".join(alines))
+            lines.append("],")
+            lines.append('"zones": [')
             zlines = []
             for z in room["zones"]:
-                zl = '{'
+                zl = "{"
                 zl += f'\n"num": {z["num"]},'
-                zl += (f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
-                       f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
-                       f'"angle": {z["enter"]["angle"]} }},')
-                zl += (f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
-                       f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
-                       f'"angle": {z["exit"]["angle"]} }}')
-                if z.get("bound"): zl += ',\n"bound": true'
-                zl += '\n}'; zlines.append(zl)
-            lines.append(",\n".join(zlines)); lines.append(']'); lines.append('}')
-            room_strs.append("\n".join(lines))
-        result += ",\n".join(room_strs) + '\n]\n}'
+                zl += (
+                    f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
+                    f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
+                    f'"angle": {z["enter"]["angle"]} }},'
+                )
+                zl += (
+                    f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
+                    f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
+                    f'"angle": {z["exit"]["angle"]} }}'
+                )
+                if z.get("bound"):
+                    zl += ',\n"bound": true'
+                zl += "\n}"
+                zlines.append(zl)
+            lines.append(",\n".join(zlines))
+            lines.append("]")
+            lines.append("}")
+            rooms_strs.append("\n".join(lines))
+
+        rooms_json_text = '{\n"rooms": [\n' + ",\n".join(rooms_strs) + "\n]\n}"
+
+        # === tracks.json (files.size в байтах) ===
         track_entries.sort(key=lambda item: (item["room_id"], not item["hall"], item["id"]))
         files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
         tracks_data = {
@@ -1699,14 +1764,15 @@ class PlanEditorMainWindow(QMainWindow):
             "version": datetime.now().strftime("%y%m%d")
         }
         tracks_path = os.path.join(os.path.dirname(fp), "tracks.json")
+
         try:
-            with open(fp,"w",encoding="utf-8") as f:
-                f.write(result)
-            with open(tracks_path,"w",encoding="utf-8") as f:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(rooms_json_text)
+            with open(tracks_path, "w", encoding="utf-8") as f:
                 json.dump(tracks_data, f, ensure_ascii=False, indent=4)
-            QMessageBox.information(self,"Экспорт","Экспорт завершён. Файл tracks.json создан.")
+            QMessageBox.information(self, "Экспорт", "Экспорт завершён. Обновлены rooms.json и tracks.json.")
         except Exception as e:
-            QMessageBox.critical(self,"Ошибка",f"Не удалось экспортировать:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def closeEvent(self, event):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
