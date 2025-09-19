@@ -1,5 +1,5 @@
 ﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
-import sys, math, json, base64, os
+import sys, math, json, base64, os, copy
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor
+    QPdfWriter, QPageSize, QCursor, QKeySequence
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
 from datetime import datetime
@@ -495,6 +495,8 @@ class HallItem(QGraphicsRectItem):
         self.setZValue(-w_px*h_px); self.tree_item = None
         self.audio_settings = None
         self.zone_audio_tracks = {}
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -538,6 +540,7 @@ class HallItem(QGraphicsRectItem):
         if act == edit:
             dlg = HallEditDialog(self, mw)
             if dlg.exec() == QDialog.Accepted:
+                prev_state = mw.capture_state()
                 values = dlg.values()
                 new_num = values['number']
                 new_name = values['name']
@@ -557,6 +560,7 @@ class HallItem(QGraphicsRectItem):
                 self.setZValue(-w_px*h_px)
                 mw.last_selected_items = []
                 mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
             anchors_rel = [a for a in mw.anchors if a.main_hall_number==self.number or self.number in a.extra_halls]
             zones_rel = [z for z in self.childItems() if isinstance(z, RectZoneItem)]
@@ -567,6 +571,7 @@ class HallItem(QGraphicsRectItem):
                                             QMessageBox.Yes|QMessageBox.No)
                 if resp != QMessageBox.Yes:
                     return
+            prev_state = mw.capture_state()
             for z in zones_rel:
                 z.scene().removeItem(z)
             for a in anchors_rel:
@@ -579,6 +584,7 @@ class HallItem(QGraphicsRectItem):
                     a.extra_halls.remove(self.number)
             mw.halls.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+            mw.push_undo_state(prev_state)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.scene():
@@ -590,6 +596,10 @@ class HallItem(QGraphicsRectItem):
             if zone:
                 event.ignore()
                 return
+            mw = self.scene().mainwindow
+            if mw and not getattr(mw, "_restoring_state", False):
+                self._undo_initial_pos = QPointF(self.pos())
+                self._undo_snapshot = mw.capture_state()
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -606,6 +616,17 @@ class HallItem(QGraphicsRectItem):
                 return
         self.open_menu(event.screenPos())
         event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.pos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def contextMenuEvent(self, event):
         # ПКМ: приоритет — якорь, затем (внутренняя) зона, затем зал
@@ -636,6 +657,8 @@ class AnchorItem(QGraphicsEllipseItem):
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
         self.update_zvalue()
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def update_zvalue(self):
         anchor_number = float(self.number) if isinstance(self.number, (int, float)) else 0.0
@@ -671,6 +694,11 @@ class AnchorItem(QGraphicsEllipseItem):
             if scene and not (event.modifiers() & Qt.ControlModifier):
                 scene.clearSelection()
             self.setSelected(True)
+            if scene:
+                mw = scene.mainwindow
+                if mw and not getattr(mw, "_restoring_state", False):
+                    self._undo_initial_pos = QPointF(self.scenePos())
+                    self._undo_snapshot = mw.capture_state()
         super().mousePressEvent(event)
         event.accept()
 
@@ -683,6 +711,14 @@ class AnchorItem(QGraphicsEllipseItem):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         self.update_zvalue()
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.scenePos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
@@ -725,6 +761,7 @@ class AnchorItem(QGraphicsEllipseItem):
             ]
             dlg = ParamDialog("Редактировать якорь", fields, mw)
             if dlg.exec() == QDialog.Accepted:
+                prev_state = mw.capture_state()
                 v = dlg.getValues()
                 self.number = v["Номер якоря"]
                 x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
@@ -736,9 +773,12 @@ class AnchorItem(QGraphicsEllipseItem):
                 self.setPos(hall.mapToScene(QPointF(px, py)))
                 self.update_zvalue()
                 mw.last_selected_items = []; mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
+            prev_state = mw.capture_state()
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+            mw.push_undo_state(prev_state)
 
 # ---------------------------------------------------------------------------
 # ZoneItem
@@ -755,6 +795,8 @@ class RectZoneItem(QGraphicsRectItem):
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
         self.update_zvalue()
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def update_zvalue(self):
         hall = self.parentItem()
@@ -806,6 +848,7 @@ class RectZoneItem(QGraphicsRectItem):
             current_audio = hall.zone_audio_tracks.get(self.zone_num) if hall else None
             dlg = ZoneEditDialog(self, current_audio, mw)
             if dlg.exec() == QDialog.Accepted:
+                prev_state = mw.capture_state()
                 values = dlg.values()
                 old_num = self.zone_num
                 self.zone_num = values['zone_num']
@@ -840,7 +883,9 @@ class RectZoneItem(QGraphicsRectItem):
                         hall.zone_audio_tracks.pop(old_num, None)
                 mw.last_selected_items = []
                 mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
+            prev_state = mw.capture_state()
             hall = self.parentItem()
             if hall:
                 others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == self.zone_num and z is not self]
@@ -848,6 +893,7 @@ class RectZoneItem(QGraphicsRectItem):
                     hall.zone_audio_tracks.pop(self.zone_num, None)
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+            mw.push_undo_state(prev_state)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.scene():
@@ -859,6 +905,10 @@ class RectZoneItem(QGraphicsRectItem):
             if smaller:
                 event.ignore()
                 return
+            mw = self.scene().mainwindow
+            if mw and not getattr(mw, "_restoring_state", False):
+                self._undo_initial_pos = QPointF(self.scenePos())
+                self._undo_snapshot = mw.capture_state()
         super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
@@ -876,6 +926,17 @@ class RectZoneItem(QGraphicsRectItem):
                 return
         self.open_menu(event.screenPos())
         event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.scenePos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def contextMenuEvent(self, event):
         # ПКМ: приоритет — якорь → меньшая зона → текущая зона
@@ -1011,15 +1072,18 @@ class PlanGraphicsScene(QGraphicsScene):
             y += step
 
     def finishCalibration(self, start, end):
+        mw = self.mainwindow
+        if not mw:
+            return
+        prev_state = mw.capture_state()
         diff = math.hypot(end.x()-start.x(), end.y()-start.y())
         length_cm, ok = QInputDialog.getDouble(
-            self.mainwindow, "Калибровка масштаба",
+            mw, "Калибровка масштаба",
             "Введите длину отрезка (см):", 100.0, 0.1, 10000.0, 1
         )
         if ok and length_cm:
             scale = diff / length_cm
             self.pixel_per_cm_x = self.pixel_per_cm_y = scale
-        mw = self.mainwindow
         mw.add_mode = None; mw.temp_start_point = None
         if self.temp_item:
             self.removeItem(self.temp_item); self.temp_item = None
@@ -1029,6 +1093,7 @@ class PlanGraphicsScene(QGraphicsScene):
         )
         if ok: self.grid_step_cm = float(step)
         mw.resnap_objects(); self.update()
+        mw.push_undo_state(prev_state)
 
     def mousePressEvent(self, event):
         mw = self.mainwindow; pos = event.scenePos()
@@ -1071,12 +1136,14 @@ class PlanGraphicsScene(QGraphicsScene):
                 params = mw.get_anchor_parameters()
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
+                prev_state = mw.capture_state()
                 num, z_m, extras, bound = params  # z в метрах
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
                 a.z = int(round(z_m * 100))       # храним в см
                 a.extra_halls, a.bound = extras, bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
+                mw.push_undo_state(prev_state)
                 return
         super().mousePressEvent(event)
 
@@ -1108,6 +1175,7 @@ class PlanGraphicsScene(QGraphicsScene):
             if x1==x0: x1=x0+step
             if y1==y0: y1=y0+step
             w_px, h_px = x1-x0, y1-y0
+            prev_state = mw.capture_state()
             hall = HallItem(x0, y0, w_px, h_px, "", 0, scene=self)
             self.addItem(hall); mw.halls.append(hall)
             # prompt parameters
@@ -1125,6 +1193,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 hall.prepareGeometryChange()
                 hall.setRect(0,0,w2_px,h2_px)
                 hall.setZValue(-w2_px*h2_px)
+                mw.push_undo_state(prev_state)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
@@ -1151,11 +1220,13 @@ class PlanGraphicsScene(QGraphicsScene):
                 if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
                 mw.temp_start_point=None; mw.add_mode=None
                 return
+            prev_state = mw.capture_state()
             num, zt, ang = params
             RectZoneItem(bl, w_pix, h_pix, num, zt, ang, hall)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None; mw.current_hall_for_zone=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
+            mw.push_undo_state(prev_state)
             return
 
         super().mouseReleaseEvent(event)
@@ -1222,7 +1293,11 @@ class PlanEditorMainWindow(QMainWindow):
         act_cal = QAction("Выполнить калибровку", self)
         toolbar.addAction(act_open); toolbar.addAction(act_cal); toolbar.addSeparator()
         act_save = QAction("Сохранить проект", self); act_load = QAction("Загрузить проект", self)
-        toolbar.addAction(act_save); toolbar.addAction(act_load); toolbar.addSeparator()
+        toolbar.addAction(act_save); toolbar.addAction(act_load)
+        self.undo_action = QAction("Отменить", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
+        toolbar.addAction(self.undo_action); toolbar.addSeparator()
         act_add_hall = QAction("Добавить зал", self)
         act_add_anchor = QAction("Добавить якорь", self)
         act_add_zone = QAction("Добавить зону", self)
@@ -1241,6 +1316,7 @@ class PlanEditorMainWindow(QMainWindow):
         act_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
         act_add_zone.triggered.connect(lambda: self.set_mode("zone"))
         self.act_lock.triggered.connect(self.lock_objects)
+        self.undo_action.triggered.connect(self.undo_last_action)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1249,12 +1325,174 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_halls = False; self.lock_zones = False; self.lock_anchors = False
         self.last_selected_items = []
         self.current_project_file = None
+        self.undo_stack = []
+        self._undo_limit = 30
+        self._restoring_state = False
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.view.setDragMode(QGraphicsView.NoDrag)
         self.view.wheelEvent = self.handle_wheel_event
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
+        self.update_undo_action()
+
+    def capture_state(self):
+        data = {
+            "image_data": "",
+            "pixel_per_cm_x": self.scene.pixel_per_cm_x,
+            "pixel_per_cm_y": self.scene.pixel_per_cm_y,
+            "grid_step_cm": self.scene.grid_step_cm,
+            "grid_calibrated": self.grid_calibrated,
+            "lock_halls": self.lock_halls,
+            "lock_zones": self.lock_zones,
+            "lock_anchors": self.lock_anchors,
+            "current_project_file": self.current_project_file,
+            "halls": [],
+            "anchors": []
+        }
+        if self.scene.pixmap:
+            buf = QBuffer(); buf.open(QBuffer.WriteOnly)
+            self.scene.pixmap.save(buf, "PNG")
+            data["image_data"] = buf.data().toBase64().data().decode()
+        for hall in self.halls:
+            hall_data = {
+                "num": hall.number,
+                "name": hall.name,
+                "x_px": hall.pos().x(),
+                "y_px": hall.pos().y(),
+                "w_px": hall.rect().width(),
+                "h_px": hall.rect().height(),
+                "audio": copy.deepcopy(hall.audio_settings) if hall.audio_settings else None,
+                "zone_audio": {str(k): copy.deepcopy(v) for k, v in hall.zone_audio_tracks.items()}
+            }
+            zones = []
+            for child in hall.childItems():
+                if isinstance(child, RectZoneItem):
+                    zones.append({
+                        "zone_num": child.zone_num,
+                        "zone_type": child.zone_type,
+                        "zone_angle": child.zone_angle,
+                        "bottom_left_x": child.pos().x(),
+                        "bottom_left_y": child.pos().y(),
+                        "w_px": child.rect().width(),
+                        "h_px": child.rect().height()
+                    })
+            hall_data["zones"] = zones
+            data["halls"].append(hall_data)
+        for anchor in self.anchors:
+            anchor_data = {
+                "number": anchor.number,
+                "z": anchor.z,
+                "x": anchor.scenePos().x(),
+                "y": anchor.scenePos().y(),
+                "main_hall": anchor.main_hall_number,
+                "extra_halls": list(anchor.extra_halls),
+                "bound": anchor.bound
+            }
+            data["anchors"].append(anchor_data)
+        return data
+
+    def restore_state(self, state):
+        if not state:
+            return
+        self._restoring_state = True
+        try:
+            self.scene.clear()
+            self.scene.temp_item = None
+            self.halls.clear()
+            self.anchors.clear()
+            image_data = state.get("image_data") or ""
+            if image_data:
+                ba = QByteArray.fromBase64(image_data.encode())
+                pix = QPixmap()
+                pix.loadFromData(ba, "PNG")
+                self.scene.set_background_image(pix)
+            else:
+                self.scene.pixmap = None
+                self.scene.setSceneRect(0, 0, 1000, 1000)
+            self.scene.pixel_per_cm_x = state.get("pixel_per_cm_x", 1.0)
+            self.scene.pixel_per_cm_y = state.get("pixel_per_cm_y", 1.0)
+            self.scene.grid_step_cm = state.get("grid_step_cm", 20.0)
+            self.grid_calibrated = state.get("grid_calibrated", False)
+            self.lock_halls = state.get("lock_halls", False)
+            self.lock_zones = state.get("lock_zones", False)
+            self.lock_anchors = state.get("lock_anchors", False)
+            self.current_project_file = state.get("current_project_file")
+            for hall_data in state.get("halls", []):
+                hall = HallItem(
+                    hall_data.get("x_px", 0.0),
+                    hall_data.get("y_px", 0.0),
+                    hall_data.get("w_px", 0.0),
+                    hall_data.get("h_px", 0.0),
+                    hall_data.get("name", ""),
+                    hall_data.get("num", 0),
+                    scene=self.scene
+                )
+                hall.audio_settings = copy.deepcopy(hall_data.get("audio")) if hall_data.get("audio") else None
+                zone_audio_raw = hall_data.get("zone_audio") or {}
+                hall.zone_audio_tracks = {int(k): copy.deepcopy(v) for k, v in zone_audio_raw.items()}
+                self.scene.addItem(hall)
+                self.halls.append(hall)
+                for zone_data in hall_data.get("zones", []):
+                    bl = QPointF(zone_data.get("bottom_left_x", 0.0), zone_data.get("bottom_left_y", 0.0))
+                    RectZoneItem(
+                        bl,
+                        zone_data.get("w_px", 0.0),
+                        zone_data.get("h_px", 0.0),
+                        zone_data.get("zone_num", 0),
+                        zone_data.get("zone_type", "Входная зона"),
+                        zone_data.get("zone_angle", 0.0),
+                        hall
+                    )
+            for anchor_data in state.get("anchors", []):
+                anchor = AnchorItem(
+                    anchor_data.get("x", 0.0),
+                    anchor_data.get("y", 0.0),
+                    anchor_data.get("number", 0),
+                    main_hall_number=anchor_data.get("main_hall"),
+                    scene=self.scene
+                )
+                anchor.z = anchor_data.get("z", 0)
+                anchor.extra_halls = list(anchor_data.get("extra_halls", []))
+                anchor.bound = bool(anchor_data.get("bound", False))
+                self.scene.addItem(anchor)
+                self.anchors.append(anchor)
+            if not image_data:
+                rect = self.scene.itemsBoundingRect()
+                if rect.isValid():
+                    margin = 100
+                    self.scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
+            self.add_mode = None
+            self.temp_start_point = None
+            self.current_hall_for_zone = None
+            self.apply_lock_flags()
+            self.populate_tree()
+            self.statusBar().clearMessage()
+        finally:
+            self._restoring_state = False
+
+    def push_undo_state(self, state=None):
+        if self._restoring_state:
+            return
+        snapshot = state if state is not None else self.capture_state()
+        if snapshot is None:
+            return
+        self.undo_stack.append(snapshot)
+        if len(self.undo_stack) > self._undo_limit:
+            self.undo_stack.pop(0)
+        self.update_undo_action()
+
+    def undo_last_action(self):
+        if not self.undo_stack:
+            return
+        state = self.undo_stack.pop()
+        self.restore_state(state)
+        self.update_undo_action()
+        self.statusBar().showMessage("Последнее действие отменено.", 3000)
+
+    def update_undo_action(self):
+        if hasattr(self, "undo_action"):
+            self.undo_action.setEnabled(bool(self.undo_stack))
 
     # Parameter getters...
     def get_anchor_parameters(self):
@@ -1271,8 +1509,10 @@ class PlanEditorMainWindow(QMainWindow):
     def lock_objects(self):
         dlg = LockDialog(self.lock_halls, self.lock_zones, self.lock_anchors, self)
         if dlg.exec() == QDialog.Accepted:
+            prev_state = self.capture_state()
             self.lock_halls, self.lock_zones, self.lock_anchors = dlg.values()
             self.apply_lock_flags()
+            self.push_undo_state(prev_state)
     def apply_lock_flags(self):
         for h in self.halls: h.setFlag(QGraphicsItem.ItemIsMovable, not self.lock_halls)
         for h in self.halls:
@@ -1375,16 +1615,31 @@ class PlanEditorMainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
-            for it in self.scene.selectedItems():
+            items = list(self.scene.selectedItems())
+            if not items:
+                return
+            prev_state = self.capture_state()
+            changed = False
+            for it in items:
                 if isinstance(it, RectZoneItem):
                     hall = it.parentItem()
                     if hall:
                         others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == it.zone_num and z is not it]
                         if not others:
                             hall.zone_audio_tracks.pop(it.zone_num, None)
-                if isinstance(it,HallItem) and it in self.halls: self.halls.remove(it)
-                if it in self.anchors: self.anchors.remove(it)
+                if isinstance(it,HallItem) and it in self.halls:
+                    self.halls.remove(it)
+                    changed = True
+                elif isinstance(it, AnchorItem) and it in self.anchors:
+                    self.anchors.remove(it)
+                    changed = True
+                else:
+                    changed = changed or isinstance(it, RectZoneItem)
                 self.scene.removeItem(it)
+            if changed:
+                self.populate_tree()
+                self.push_undo_state(prev_state)
+            return
         else:
             super().keyPressEvent(event)
 
@@ -1453,11 +1708,13 @@ class PlanEditorMainWindow(QMainWindow):
         pix = QPixmap(fp)
         if pix.isNull():
             QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
+        prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
+        self.push_undo_state(prev_state)
 
     def save_project(self):
         if not self.current_project_file:
@@ -1523,6 +1780,7 @@ class PlanEditorMainWindow(QMainWindow):
     def load_project(self):
         fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
         if not fp: return
+        prev_state = self.capture_state()
         try:
             with open(fp,"r",encoding="utf-8") as f:
                 data = json.load(f)
@@ -1576,6 +1834,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.current_project_file = fp
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
+        self.push_undo_state(prev_state)
 
     def export_config(self):
         fp, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", "", "*.json")
