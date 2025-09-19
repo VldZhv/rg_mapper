@@ -533,7 +533,10 @@ class HallItem(QGraphicsRectItem):
         mw = self.scene().mainwindow
         ppcm = self.scene().pixel_per_cm_x
         menu = QMenu()
-        header = menu.addAction(f"Зал {self.number}"); header.setEnabled(False)
+        hall_title = f"Зал {self.number}"
+        if self.name:
+            hall_title += f" — {self.name}"
+        header = menu.addAction(hall_title); header.setEnabled(False)
         edit = menu.addAction("Редактировать зал")
         delete = menu.addAction("Удалить зал")
         act = menu.exec(global_pos)
@@ -846,7 +849,11 @@ class RectZoneItem(QGraphicsRectItem):
         data = self.get_export_data()
         if data is None: return
         menu = QMenu()
-        header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()})"); header.setEnabled(False)
+        hall = self.parentItem()
+        hall_suffix = ""
+        if isinstance(hall, HallItem):
+            hall_suffix = f" — зал {hall.number}"
+        header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()}){hall_suffix}"); header.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
