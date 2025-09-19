@@ -606,11 +606,11 @@ class HallItem(QGraphicsRectItem):
         if base_id:
             parts.append(f"ID {base_id}")
 
-        duration_ms = info.get("duration_ms")
-        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
-            total_seconds = int(round(duration_ms / 1000))
+        duration_ms = int(info.get("duration_ms") or 0)
+        if duration_ms > 0:
+            total_seconds = duration_ms // 1000
             minutes, seconds = divmod(total_seconds, 60)
-            parts.append(f"длительность {minutes}:{seconds:02d}")
+            parts.append(f"длительность {minutes:02d}:{seconds:02d}")
 
         secondary = info.get("secondary")
         if isinstance(secondary, dict):
