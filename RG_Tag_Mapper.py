@@ -495,6 +495,8 @@ class HallItem(QGraphicsRectItem):
         self.setZValue(-w_px*h_px); self.tree_item = None
         self.audio_settings = None
         self.zone_audio_tracks = {}
+        self._drag_origin = None
+        self._undo_snapshot = None
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -592,7 +594,23 @@ class HallItem(QGraphicsRectItem):
             if zone:
                 event.ignore()
                 return
+            mw = getattr(self.scene(), "mainwindow", None)
+            if mw and self.flags() & QGraphicsItem.ItemIsMovable:
+                self._drag_origin = QPointF(self.pos())
+                self._undo_snapshot = mw.build_project_data()
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            moved = False
+            if self._drag_origin is not None:
+                moved = (self.pos() - self._drag_origin).manhattanLength() > 0.1
+            mw = getattr(self.scene(), "mainwindow", None)
+            if moved and mw and self._undo_snapshot:
+                mw.push_undo_state(snapshot=self._undo_snapshot)
+            self._drag_origin = None
+            self._undo_snapshot = None
 
     def mouseDoubleClickEvent(self, event):
         if self.scene():
@@ -638,6 +656,8 @@ class AnchorItem(QGraphicsEllipseItem):
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
         self.update_zvalue()
+        self._drag_origin = None
+        self._undo_snapshot = None
 
     def update_zvalue(self):
         anchor_number = float(self.number) if isinstance(self.number, (int, float)) else 0.0
@@ -673,6 +693,10 @@ class AnchorItem(QGraphicsEllipseItem):
             if scene and not (event.modifiers() & Qt.ControlModifier):
                 scene.clearSelection()
             self.setSelected(True)
+            mw = getattr(scene, "mainwindow", None)
+            if mw and self.flags() & QGraphicsItem.ItemIsMovable:
+                self._drag_origin = QPointF(self.pos())
+                self._undo_snapshot = mw.build_project_data()
         super().mousePressEvent(event)
         event.accept()
 
@@ -685,6 +709,15 @@ class AnchorItem(QGraphicsEllipseItem):
     def mouseReleaseEvent(self, event):
         super().mouseReleaseEvent(event)
         self.update_zvalue()
+        if event.button() == Qt.LeftButton:
+            moved = False
+            if self._drag_origin is not None:
+                moved = (self.pos() - self._drag_origin).manhattanLength() > 0.1
+            mw = getattr(self.scene(), "mainwindow", None) if self.scene() else None
+            if moved and mw and self._undo_snapshot:
+                mw.push_undo_state(snapshot=self._undo_snapshot)
+            self._drag_origin = None
+            self._undo_snapshot = None
         event.accept()
 
     def mouseDoubleClickEvent(self, event):
@@ -758,6 +791,8 @@ class RectZoneItem(QGraphicsRectItem):
             self.setPen(QPen(QColor(128,0,128),2)); self.setBrush(QBrush(QColor(128,0,128,50)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
+        self._drag_origin = None
+        self._undo_snapshot = None
         self.update_zvalue()
 
     def update_zvalue(self):
@@ -865,7 +900,23 @@ class RectZoneItem(QGraphicsRectItem):
             if smaller:
                 event.ignore()
                 return
+            mw = getattr(self.scene(), "mainwindow", None)
+            if mw and self.flags() & QGraphicsItem.ItemIsMovable:
+                self._drag_origin = QPointF(self.pos())
+                self._undo_snapshot = mw.build_project_data()
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            moved = False
+            if self._drag_origin is not None:
+                moved = (self.pos() - self._drag_origin).manhattanLength() > 0.1
+            mw = getattr(self.scene(), "mainwindow", None)
+            if moved and mw and self._undo_snapshot:
+                mw.push_undo_state(snapshot=self._undo_snapshot)
+            self._drag_origin = None
+            self._undo_snapshot = None
 
     def mouseDoubleClickEvent(self, event):
         scene = self.scene()
@@ -1414,10 +1465,11 @@ class PlanEditorMainWindow(QMainWindow):
         self.last_selected_items = []
         self.statusBar().clearMessage()
 
-    def push_undo_state(self):
+    def push_undo_state(self, snapshot=None):
         if self._restoring_state:
             return
-        snapshot = self.build_project_data()
+        if snapshot is None:
+            snapshot = self.build_project_data()
         self.undo_stack.append(snapshot)
         if len(self.undo_stack) > self.max_undo_steps:
             self.undo_stack.pop(0)
