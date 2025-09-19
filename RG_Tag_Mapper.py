@@ -717,8 +717,8 @@ class AnchorItem(QGraphicsEllipseItem):
         if act == edit:
             fields = [
                 {"label": "Номер якоря", "type": "int", "default": self.number, "min": 0, "max": 10000},
-                {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
+                {"label":"Координата X (м)","type":"float","default":x_m,"min":-1000.0,"max":10000,"decimals":1},
+                {"label":"Координата Y (м)","type":"float","default":y_m,"min":-1000.0,"max":10000,"decimals":1},
                 {"label":"Координата Z (м)","type":"float","default":z_m,"min":-100,"max":100,"decimals":1},
                 {"label":"Доп. залы","type":"string","default":",".join(str(x) for x in self.extra_halls)},
                 {"label":"Переходный","type":"bool","default":self.bound}
