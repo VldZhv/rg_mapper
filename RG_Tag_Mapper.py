@@ -854,6 +854,19 @@ class RectZoneItem(QGraphicsRectItem):
         if isinstance(hall, HallItem):
             hall_suffix = f" — зал {hall.number}"
         header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()}){hall_suffix}"); header.setEnabled(False)
+        audio_info = None
+        if isinstance(hall, HallItem):
+            audio_info = hall.zone_audio_tracks.get(self.zone_num)
+        if audio_info:
+            filename = audio_info.get('filename') or "(без названия)"
+            duration_ms = int(audio_info.get('duration_ms') or 0)
+            audio_line = f"Аудиотрек: {filename}"
+            if duration_ms > 0:
+                total_seconds = max(duration_ms // 1000, 0)
+                minutes, seconds = divmod(total_seconds, 60)
+                audio_line += f" ({minutes:02d}:{seconds:02d})"
+            track_action = menu.addAction(audio_line)
+            track_action.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
