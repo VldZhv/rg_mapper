@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor
+    QPdfWriter, QPageSize, QCursor, QKeySequence
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
 from datetime import datetime
@@ -539,6 +539,7 @@ class HallItem(QGraphicsRectItem):
             dlg = HallEditDialog(self, mw)
             if dlg.exec() == QDialog.Accepted:
                 values = dlg.values()
+                mw.push_undo_state()
                 new_num = values['number']
                 new_name = values['name']
                 new_w_m = values['width']
@@ -567,6 +568,7 @@ class HallItem(QGraphicsRectItem):
                                             QMessageBox.Yes|QMessageBox.No)
                 if resp != QMessageBox.Yes:
                     return
+            mw.push_undo_state()
             for z in zones_rel:
                 z.scene().removeItem(z)
             for a in anchors_rel:
@@ -726,6 +728,7 @@ class AnchorItem(QGraphicsEllipseItem):
             dlg = ParamDialog("Редактировать якорь", fields, mw)
             if dlg.exec() == QDialog.Accepted:
                 v = dlg.getValues()
+                mw.push_undo_state()
                 self.number = v["Номер якоря"]
                 x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
                 self.bound = v["Переходный"]
@@ -737,6 +740,7 @@ class AnchorItem(QGraphicsEllipseItem):
                 self.update_zvalue()
                 mw.last_selected_items = []; mw.populate_tree()
         elif act == delete:
+            mw.push_undo_state()
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
@@ -807,6 +811,7 @@ class RectZoneItem(QGraphicsRectItem):
             dlg = ZoneEditDialog(self, current_audio, mw)
             if dlg.exec() == QDialog.Accepted:
                 values = dlg.values()
+                mw.push_undo_state()
                 old_num = self.zone_num
                 self.zone_num = values['zone_num']
                 self.zone_type = values['zone_type']
@@ -846,6 +851,7 @@ class RectZoneItem(QGraphicsRectItem):
                 others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == self.zone_num and z is not self]
                 if not others:
                     hall.zone_audio_tracks.pop(self.zone_num, None)
+            mw.push_undo_state()
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
 
@@ -1016,10 +1022,12 @@ class PlanGraphicsScene(QGraphicsScene):
             self.mainwindow, "Калибровка масштаба",
             "Введите длину отрезка (см):", 100.0, 0.1, 10000.0, 1
         )
+        mw = self.mainwindow
         if ok and length_cm:
+            if mw:
+                mw.push_undo_state()
             scale = diff / length_cm
             self.pixel_per_cm_x = self.pixel_per_cm_y = scale
-        mw = self.mainwindow
         mw.add_mode = None; mw.temp_start_point = None
         if self.temp_item:
             self.removeItem(self.temp_item); self.temp_item = None
@@ -1072,6 +1080,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
                 num, z_m, extras, bound = params  # z в метрах
+                mw.push_undo_state()
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
                 a.z = int(round(z_m * 100))       # храним в см
                 a.extra_halls, a.bound = extras, bound
@@ -1108,24 +1117,17 @@ class PlanGraphicsScene(QGraphicsScene):
             if x1==x0: x1=x0+step
             if y1==y0: y1=y0+step
             w_px, h_px = x1-x0, y1-y0
-            hall = HallItem(x0, y0, w_px, h_px, "", 0, scene=self)
-            self.addItem(hall); mw.halls.append(hall)
-            # prompt parameters
             w_m = w_px/(self.pixel_per_cm_x*100)
             h_m = h_px/(self.pixel_per_cm_x*100)
             params = getHallParameters(1, "", w_m, h_m, self)
-            if not params:
-                self.removeItem(hall); mw.halls.remove(hall)
-            else:
+            if params:
                 num, name, new_w_m, new_h_m = params
-                hall.number, hall.name = num, name
-                # resize if needed
                 w2_px = new_w_m * self.pixel_per_cm_x * 100
                 h2_px = new_h_m * self.pixel_per_cm_x * 100
-                hall.prepareGeometryChange()
-                hall.setRect(0,0,w2_px,h2_px)
-                hall.setZValue(-w2_px*h2_px)
-            mw.last_selected_items=[]; mw.populate_tree()
+                mw.push_undo_state()
+                hall = HallItem(x0, y0, w2_px, h2_px, name, num, scene=self)
+                self.addItem(hall); mw.halls.append(hall)
+                mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
             return
@@ -1152,6 +1154,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 mw.temp_start_point=None; mw.add_mode=None
                 return
             num, zt, ang = params
+            mw.push_undo_state()
             RectZoneItem(bl, w_pix, h_pix, num, zt, ang, hall)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None; mw.current_hall_for_zone=None
@@ -1231,6 +1234,18 @@ class PlanEditorMainWindow(QMainWindow):
         act_export = QAction("Экспорт конфигурации", self); toolbar.addAction(act_export)
         act_pdf = QAction("Сохранить в PDF", self); toolbar.addAction(act_pdf)
 
+        self.undo_stack = []
+        self.max_undo_steps = 30
+        self._restoring_state = False
+
+        self.undo_action = QAction("Отменить", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setShortcutContext(Qt.ApplicationShortcut)
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo_last_action)
+        toolbar.addAction(self.undo_action)
+        self.addAction(self.undo_action)
+
         act_open.triggered.connect(self.open_image)
         act_cal.triggered.connect(self.perform_calibration)
         act_save.triggered.connect(self.save_project)
@@ -1256,6 +1271,167 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
 
+    def _update_undo_action(self):
+        if hasattr(self, 'undo_action'):
+            self.undo_action.setEnabled(bool(self.undo_stack))
+
+    def build_project_data(self, include_runtime=True):
+        buf_data = ""
+        if self.scene.pixmap:
+            buf = QBuffer()
+            buf.open(QBuffer.WriteOnly)
+            self.scene.pixmap.save(buf, "PNG")
+            buf_data = buf.data().toBase64().data().decode()
+        data = {
+            "image_data": buf_data,
+            "pixel_per_cm_x": self.scene.pixel_per_cm_x,
+            "pixel_per_cm_y": self.scene.pixel_per_cm_y,
+            "grid_step_cm": self.scene.grid_step_cm,
+            "lock_halls": self.lock_halls,
+            "lock_zones": self.lock_zones,
+            "lock_anchors": self.lock_anchors,
+            "grid_calibrated": self.grid_calibrated,
+            "halls": [],
+            "anchors": []
+        }
+        for h in self.halls:
+            hd = {
+                "num": h.number,
+                "name": h.name,
+                "x_px": h.pos().x(),
+                "y_px": h.pos().y(),
+                "w_px": h.rect().width(),
+                "h_px": h.rect().height()
+            }
+            if h.audio_settings:
+                hd["audio"] = h.audio_settings
+            if h.zone_audio_tracks:
+                hd["zone_audio"] = {str(k): v for k, v in h.zone_audio_tracks.items()}
+            zs = []
+            for ch in h.childItems():
+                if isinstance(ch, RectZoneItem):
+                    zs.append({
+                        "zone_num": ch.zone_num,
+                        "zone_type": ch.zone_type,
+                        "zone_angle": ch.zone_angle,
+                        "bottom_left_x": ch.pos().x(),
+                        "bottom_left_y": ch.pos().y(),
+                        "w_px": ch.rect().width(),
+                        "h_px": ch.rect().height()
+                    })
+            hd["zones"] = zs
+            data["halls"].append(hd)
+        for a in self.anchors:
+            ad = {
+                "number": a.number,
+                "z": a.z,
+                "x": a.scenePos().x(),
+                "y": a.scenePos().y(),
+                "main_hall": a.main_hall_number,
+                "extra_halls": list(a.extra_halls)
+            }
+            if a.bound:
+                ad["bound"] = True
+            data["anchors"].append(ad)
+        if include_runtime:
+            data["current_project_file"] = self.current_project_file
+        return data
+
+    def apply_project_data(self, data):
+        self._restoring_state = True
+        try:
+            self.scene.clear()
+            self.halls.clear()
+            self.anchors.clear()
+            self.scene.temp_item = None
+            self.scene.pixmap = None
+            buf_data = data.get("image_data", "")
+            if buf_data:
+                ba = QByteArray.fromBase64(buf_data.encode())
+                pix = QPixmap()
+                pix.loadFromData(ba, "PNG")
+                self.scene.set_background_image(pix)
+            else:
+                self.scene.setSceneRect(0, 0, 0, 0)
+            self.scene.pixel_per_cm_x = data.get("pixel_per_cm_x", 1.0)
+            self.scene.pixel_per_cm_y = data.get("pixel_per_cm_y", 1.0)
+            self.scene.grid_step_cm = data.get("grid_step_cm", 20.0)
+            self.lock_halls = data.get("lock_halls", False)
+            self.lock_zones = data.get("lock_zones", False)
+            self.lock_anchors = data.get("lock_anchors", False)
+            self.grid_calibrated = data.get("grid_calibrated", True)
+            if "current_project_file" in data:
+                self.current_project_file = data.get("current_project_file")
+            for hd in data.get("halls", []):
+                hall = HallItem(
+                    hd.get("x_px", 0),
+                    hd.get("y_px", 0),
+                    hd.get("w_px", 100),
+                    hd.get("h_px", 100),
+                    hd.get("name", ""),
+                    hd.get("num", 0),
+                    scene=self.scene
+                )
+                hall.audio_settings = hd.get("audio")
+                zone_audio_raw = hd.get("zone_audio", {})
+                if zone_audio_raw:
+                    hall.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
+                self.scene.addItem(hall)
+                self.halls.append(hall)
+                for zd in hd.get("zones", []):
+                    bl = QPointF(zd.get("bottom_left_x", 0), zd.get("bottom_left_y", 0))
+                    RectZoneItem(
+                        bl,
+                        zd.get("w_px", 0),
+                        zd.get("h_px", 0),
+                        zd.get("zone_num", 0),
+                        zd.get("zone_type", "Входная зона"),
+                        zd.get("zone_angle", 0),
+                        hall
+                    )
+            for ad in data.get("anchors", []):
+                anchor = AnchorItem(
+                    ad.get("x", 0),
+                    ad.get("y", 0),
+                    ad.get("number", 0),
+                    main_hall_number=ad.get("main_hall"),
+                    scene=self.scene
+                )
+                anchor.z = ad.get("z", 0)
+                anchor.extra_halls = ad.get("extra_halls", [])
+                if ad.get("bound"):
+                    anchor.bound = True
+                self.scene.addItem(anchor)
+                self.anchors.append(anchor)
+        finally:
+            self._restoring_state = False
+        self.apply_lock_flags()
+        self.populate_tree()
+        self.scene.update()
+        self.add_mode = None
+        self.temp_start_point = None
+        self.current_hall_for_zone = None
+        self.last_selected_items = []
+        self.statusBar().clearMessage()
+
+    def push_undo_state(self):
+        if self._restoring_state:
+            return
+        snapshot = self.build_project_data()
+        self.undo_stack.append(snapshot)
+        if len(self.undo_stack) > self.max_undo_steps:
+            self.undo_stack.pop(0)
+        self._update_undo_action()
+
+    def undo_last_action(self):
+        if not self.undo_stack:
+            self.statusBar().showMessage("Нет действий для отмены.", 2000)
+            return
+        snapshot = self.undo_stack.pop()
+        self._update_undo_action()
+        self.apply_project_data(snapshot)
+        self.statusBar().showMessage("Последнее действие отменено.", 2000)
+
     # Parameter getters...
     def get_anchor_parameters(self):
         default = 1 if not self.anchors else max(a.number for a in self.anchors)+1
@@ -1271,6 +1447,7 @@ class PlanEditorMainWindow(QMainWindow):
     def lock_objects(self):
         dlg = LockDialog(self.lock_halls, self.lock_zones, self.lock_anchors, self)
         if dlg.exec() == QDialog.Accepted:
+            self.push_undo_state()
             self.lock_halls, self.lock_zones, self.lock_anchors = dlg.values()
             self.apply_lock_flags()
     def apply_lock_flags(self):
@@ -1375,7 +1552,11 @@ class PlanEditorMainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
-            for it in self.scene.selectedItems():
+            items = list(self.scene.selectedItems())
+            if not items:
+                return
+            self.push_undo_state()
+            for it in items:
                 if isinstance(it, RectZoneItem):
                     hall = it.parentItem()
                     if hall:
@@ -1385,6 +1566,7 @@ class PlanEditorMainWindow(QMainWindow):
                 if isinstance(it,HallItem) and it in self.halls: self.halls.remove(it)
                 if it in self.anchors: self.anchors.remove(it)
                 self.scene.removeItem(it)
+            self.populate_tree()
         else:
             super().keyPressEvent(event)
 
@@ -1453,6 +1635,7 @@ class PlanEditorMainWindow(QMainWindow):
         pix = QPixmap(fp)
         if pix.isNull():
             QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
+        self.push_undo_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
@@ -1466,53 +1649,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.current_project_file = fp
         else:
             fp = self.current_project_file
-        buf_data = ""
-        if self.scene.pixmap:
-            buf = QBuffer(); buf.open(QBuffer.WriteOnly)
-            self.scene.pixmap.save(buf,"PNG")
-            buf_data = buf.data().toBase64().data().decode()
-        data = {
-            "image_data": buf_data,
-            "pixel_per_cm_x": self.scene.pixel_per_cm_x,
-            "pixel_per_cm_y": self.scene.pixel_per_cm_y,
-            "grid_step_cm": self.scene.grid_step_cm,
-            "lock_halls": self.lock_halls,
-            "lock_zones": self.lock_zones,
-            "lock_anchors": self.lock_anchors,
-            "halls": [], "anchors": []
-        }
-        for h in self.halls:
-            hd = {
-                "num": h.number, "name": h.name,
-                "x_px": h.pos().x(), "y_px": h.pos().y(),
-                "w_px": h.rect().width(), "h_px": h.rect().height()
-            }
-            if h.audio_settings:
-                hd["audio"] = h.audio_settings
-            if h.zone_audio_tracks:
-                hd["zone_audio"] = {str(k): v for k, v in h.zone_audio_tracks.items()}
-            zs = []
-            for ch in h.childItems():
-                if isinstance(ch,RectZoneItem):
-                    zs.append({
-                        "zone_num": ch.zone_num,
-                        "zone_type": ch.zone_type,
-                        "zone_angle": ch.zone_angle,
-                        "bottom_left_x": ch.pos().x(),
-                        "bottom_left_y": ch.pos().y(),
-                        "w_px": ch.rect().width(),
-                        "h_px": ch.rect().height()
-                    })
-            hd["zones"] = zs; data["halls"].append(hd)
-        for a in self.anchors:
-            ad = {
-                "number": a.number, "z": a.z,
-                "x": a.scenePos().x(), "y": a.scenePos().y(),
-                "main_hall": a.main_hall_number,
-                "extra_halls": a.extra_halls
-            }
-            if a.bound: ad["bound"] = True
-            data["anchors"].append(ad)
+        data = self.build_project_data(include_runtime=False)
         try:
             with open(fp,"w",encoding="utf-8") as f:
                 json.dump(data,f,ensure_ascii=False,indent=4)
@@ -1528,51 +1665,8 @@ class PlanEditorMainWindow(QMainWindow):
                 data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self,"Ошибка",f"Ошибка чтения:\n{e}"); return
-        self.scene.clear(); self.halls.clear(); self.anchors.clear()
-        buf_data = data.get("image_data","")
-        if buf_data:
-            ba = QByteArray.fromBase64(buf_data.encode())
-            pix = QPixmap(); pix.loadFromData(ba,"PNG")
-            self.scene.set_background_image(pix)
-        self.scene.pixel_per_cm_x = data.get("pixel_per_cm_x",1.0)
-        self.scene.pixel_per_cm_y = data.get("pixel_per_cm_y",1.0)
-        self.scene.grid_step_cm   = data.get("grid_step_cm",20.0)
-        self.lock_halls   = data.get("lock_halls",False)
-        self.lock_zones   = data.get("lock_zones",False)
-        self.lock_anchors = data.get("lock_anchors",False)
-        self.grid_calibrated = True
-        for hd in data.get("halls",[]):
-            h = HallItem(
-                hd.get("x_px",0), hd.get("y_px",0),
-                hd.get("w_px",100), hd.get("h_px",100),
-                hd.get("name",""), hd.get("num",0),
-                scene=self.scene
-            )
-            h.audio_settings = hd.get("audio")
-            zone_audio_raw = hd.get("zone_audio", {})
-            if zone_audio_raw:
-                h.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
-            self.scene.addItem(h); self.halls.append(h)
-            for zd in hd.get("zones",[]):
-                bl = QPointF(zd.get("bottom_left_x",0), zd.get("bottom_left_y",0))
-                RectZoneItem(
-                    bl, zd.get("w_px",0), zd.get("h_px",0),
-                    zd.get("zone_num",0),
-                    zd.get("zone_type","Входная зона"),
-                    zd.get("zone_angle",0), h
-                )
-        for ad in data.get("anchors",[]):
-            a = AnchorItem(
-                ad.get("x",0), ad.get("y",0),
-                ad.get("number",0),
-                main_hall_number=ad.get("main_hall"),
-                scene=self.scene
-            )
-            a.z = ad.get("z",0)
-            a.extra_halls = ad.get("extra_halls",[])
-            if ad.get("bound"): a.bound = True
-            self.scene.addItem(a); self.anchors.append(a)
-        self.apply_lock_flags(); self.populate_tree()
+        self.push_undo_state()
+        self.apply_project_data(data)
         self.current_project_file = fp
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
