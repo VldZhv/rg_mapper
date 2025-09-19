@@ -1050,6 +1050,8 @@ class PlanGraphicsScene(QGraphicsScene):
     def set_background_image(self, pix):
         self.pixmap = pix
         self.setSceneRect(0, 0, pix.width(), pix.height())
+        if self.mainwindow:
+            self.mainwindow._reset_background_cache()
 
     def drawBackground(self, painter, rect):
         if self.pixmap:
@@ -1328,6 +1330,8 @@ class PlanEditorMainWindow(QMainWindow):
         self.undo_stack = []
         self._undo_limit = 30
         self._restoring_state = False
+        self._undo_bg_cache_key = None
+        self._undo_bg_image = ""
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -1335,6 +1339,10 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
+
+    def _reset_background_cache(self):
+        self._undo_bg_cache_key = None
+        self._undo_bg_image = ""
 
     def capture_state(self):
         data = {
@@ -1351,9 +1359,18 @@ class PlanEditorMainWindow(QMainWindow):
             "anchors": []
         }
         if self.scene.pixmap:
-            buf = QBuffer(); buf.open(QBuffer.WriteOnly)
-            self.scene.pixmap.save(buf, "PNG")
-            data["image_data"] = buf.data().toBase64().data().decode()
+            cache_key = self.scene.pixmap.cacheKey()
+            if self._undo_bg_cache_key == cache_key and self._undo_bg_image:
+                data["image_data"] = self._undo_bg_image
+            else:
+                buf = QBuffer(); buf.open(QBuffer.WriteOnly)
+                self.scene.pixmap.save(buf, "PNG")
+                encoded = buf.data().toBase64().data().decode()
+                data["image_data"] = encoded
+                self._undo_bg_cache_key = cache_key
+                self._undo_bg_image = encoded
+        else:
+            self._reset_background_cache()
         for hall in self.halls:
             hall_data = {
                 "num": hall.number,
@@ -1410,6 +1427,7 @@ class PlanEditorMainWindow(QMainWindow):
             else:
                 self.scene.pixmap = None
                 self.scene.setSceneRect(0, 0, 1000, 1000)
+                self._reset_background_cache()
             self.scene.pixel_per_cm_x = state.get("pixel_per_cm_x", 1.0)
             self.scene.pixel_per_cm_y = state.get("pixel_per_cm_y", 1.0)
             self.scene.grid_step_cm = state.get("grid_step_cm", 20.0)
@@ -1710,6 +1728,8 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
         prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.pixmap = None
+        self._reset_background_cache()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
@@ -1787,6 +1807,8 @@ class PlanEditorMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self,"Ошибка",f"Ошибка чтения:\n{e}"); return
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.pixmap = None
+        self._reset_background_cache()
         buf_data = data.get("image_data","")
         if buf_data:
             ba = QByteArray.fromBase64(buf_data.encode())
