@@ -56,6 +56,19 @@ def load_audio_file_info(path: str):
     }
 
 
+def format_audio_menu_line(info) -> str | None:
+    if not isinstance(info, dict):
+        return None
+    filename = info.get('filename') or "(без названия)"
+    audio_line = f"Аудиотрек: {filename}"
+    duration_ms = int(info.get('duration_ms') or 0)
+    if duration_ms > 0:
+        total_seconds = max(duration_ms // 1000, 0)
+        minutes, seconds = divmod(total_seconds, 60)
+        audio_line += f" ({minutes:02d}:{seconds:02d})"
+    return audio_line
+
+
 class AudioTrackWidget(QWidget):
     def __init__(self, parent=None, data=None):
         super().__init__(parent)
@@ -594,32 +607,7 @@ class HallItem(QGraphicsRectItem):
             mw.push_undo_state(prev_state)
 
     def _get_audio_info_text(self) -> str | None:
-        info = self.audio_settings
-        if not isinstance(info, dict):
-            return None
-        filename = info.get("filename")
-        if not filename:
-            return None
-
-        parts = []
-        base_id = extract_track_id(filename)
-        if base_id:
-            parts.append(f"ID {base_id}")
-
-        duration_ms = int(info.get("duration_ms") or 0)
-        if duration_ms > 0:
-            total_seconds = duration_ms // 1000
-            minutes, seconds = divmod(total_seconds, 60)
-            parts.append(f"длительность {minutes:02d}:{seconds:02d}")
-
-        secondary = info.get("secondary")
-        if isinstance(secondary, dict):
-            sec_filename = secondary.get("filename")
-            if sec_filename:
-                parts.append(f"доп. файл: {sec_filename}")
-
-        suffix = f" ({'; '.join(parts)})" if parts else ""
-        return f"Аудиотрек: {filename}{suffix}"
+        return format_audio_menu_line(self.audio_settings)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.scene():
@@ -890,15 +878,10 @@ class RectZoneItem(QGraphicsRectItem):
         if isinstance(hall, HallItem):
             audio_info = hall.zone_audio_tracks.get(self.zone_num)
         if audio_info:
-            filename = audio_info.get('filename') or "(без названия)"
-            duration_ms = int(audio_info.get('duration_ms') or 0)
-            audio_line = f"Аудиотрек: {filename}"
-            if duration_ms > 0:
-                total_seconds = max(duration_ms // 1000, 0)
-                minutes, seconds = divmod(total_seconds, 60)
-                audio_line += f" ({minutes:02d}:{seconds:02d})"
-            track_action = menu.addAction(audio_line)
-            track_action.setEnabled(False)
+            audio_line = format_audio_menu_line(audio_info)
+            if audio_line:
+                track_action = menu.addAction(audio_line)
+                track_action.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
