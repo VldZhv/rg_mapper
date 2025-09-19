@@ -537,6 +537,10 @@ class HallItem(QGraphicsRectItem):
         if self.name:
             hall_title += f" — {self.name}"
         header = menu.addAction(hall_title); header.setEnabled(False)
+        audio_info_text = self._get_audio_info_text()
+        if audio_info_text:
+            audio_line = menu.addAction(audio_info_text)
+            audio_line.setEnabled(False)
         edit = menu.addAction("Редактировать зал")
         delete = menu.addAction("Удалить зал")
         act = menu.exec(global_pos)
@@ -588,6 +592,38 @@ class HallItem(QGraphicsRectItem):
             mw.halls.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
             mw.push_undo_state(prev_state)
+
+    def _get_audio_info_text(self) -> str | None:
+        info = self.audio_settings
+        if not isinstance(info, dict):
+            return None
+        filename = info.get("filename")
+        if not filename:
+            return None
+
+        parts = []
+        base_id = extract_track_id(filename)
+        if base_id:
+            parts.append(f"ID {base_id}")
+
+        extras = [str(x) for x in info.get("extra_ids", []) if isinstance(x, int)]
+        if extras:
+            parts.append("доп. ID: " + ", ".join(extras))
+
+        duration_ms = info.get("duration_ms")
+        if isinstance(duration_ms, (int, float)) and duration_ms > 0:
+            total_seconds = int(round(duration_ms / 1000))
+            minutes, seconds = divmod(total_seconds, 60)
+            parts.append(f"длительность {minutes}:{seconds:02d}")
+
+        secondary = info.get("secondary")
+        if isinstance(secondary, dict):
+            sec_filename = secondary.get("filename")
+            if sec_filename:
+                parts.append(f"доп. файл: {sec_filename}")
+
+        suffix = f" ({'; '.join(parts)})" if parts else ""
+        return f"Аудиотрек: {filename}{suffix}"
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton and self.scene():
