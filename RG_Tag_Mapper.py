@@ -775,6 +775,14 @@ class AnchorItem(QGraphicsEllipseItem):
                 mw.last_selected_items = []; mw.populate_tree()
                 mw.push_undo_state(prev_state)
         elif act == delete:
+            confirm = QMessageBox.question(
+                mw,
+                "Подтвердить",
+                f"Удалить якорь {self.number} ({halls_str})?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm != QMessageBox.Yes:
+                return
             prev_state = mw.capture_state()
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
@@ -885,6 +893,14 @@ class RectZoneItem(QGraphicsRectItem):
                 mw.populate_tree()
                 mw.push_undo_state(prev_state)
         elif act == delete:
+            confirm = QMessageBox.question(
+                mw,
+                "Подтвердить",
+                f"Удалить зону {self.zone_num} ({self.get_display_type()})?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm != QMessageBox.Yes:
+                return
             prev_state = mw.capture_state()
             hall = self.parentItem()
             if hall:
