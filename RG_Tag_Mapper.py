@@ -15,6 +15,10 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
 from datetime import datetime
 from mutagen.mp3 import MP3
+# + к уже имеющемуся
+from PySide6.QtWidgets import QFrame, QWidgetAction
+from PySide6.QtCore import QSize
+
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
