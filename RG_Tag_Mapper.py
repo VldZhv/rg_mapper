@@ -1,19 +1,245 @@
-import sys, math, json, base64
+﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
+import sys, math, json, base64, os, copy
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
-    QLabel, QInputDialog, QCheckBox
+    QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
+    QGroupBox
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor
+    QPdfWriter, QPageSize, QCursor, QKeySequence
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
+from datetime import datetime
+from mutagen.mp3 import MP3
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
+
+# ---------------------------------------------------------------------------
+# Audio helpers and widgets
+# ---------------------------------------------------------------------------
+def extract_track_id(filename: str) -> int:
+    name = os.path.splitext(os.path.basename(filename))[0]
+    digits = ''.join(ch for ch in name if ch.isdigit())
+    return int(digits) if digits else 0
+
+
+def parse_additional_ids(text: str):
+    ids = []
+    for token in text.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            ids.append(int(token))
+        except ValueError:
+            continue
+    return ids
+
+
+def load_audio_file_info(path: str):
+    try:
+        audio = MP3(path)
+    except Exception as exc:
+        raise ValueError(str(exc)) from exc
+    duration_ms = int(round(audio.info.length * 1000)) if audio.info.length else 0
+    with open(path, 'rb') as fh:
+        encoded = base64.b64encode(fh.read()).decode('ascii')
+    return {
+        'filename': os.path.basename(path),
+        'data': encoded,
+        'duration_ms': duration_ms
+    }
+
+
+def format_audio_menu_line(info) -> str | None:
+    if not isinstance(info, dict):
+        return None
+    filename = info.get('filename') or "(без названия)"
+    audio_line = f"Аудиотрек: {filename}"
+    duration_ms = int(info.get('duration_ms') or 0)
+    if duration_ms > 0:
+        total_seconds = max(duration_ms // 1000, 0)
+        minutes, seconds = divmod(total_seconds, 60)
+        audio_line += f" ({minutes:02d}:{seconds:02d})"
+    return audio_line
+
+
+class AudioTrackWidget(QWidget):
+    def __init__(self, parent=None, data=None):
+        super().__init__(parent)
+        self.main_file_info = None
+        self.secondary_file_info = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        header = QLabel("Аудио трек")
+        header.setStyleSheet("font-weight: bold;")
+        layout.addWidget(header)
+
+        main_row = QWidget()
+        main_row_layout = QHBoxLayout(main_row)
+        main_row_layout.setContentsMargins(0, 0, 0, 0)
+        main_row_layout.addWidget(QLabel("Файл:"))
+        self.main_file_label = QLabel("Не выбран")
+        main_row_layout.addWidget(self.main_file_label)
+        main_row_layout.addStretch(1)
+        self.select_button = QPushButton("Выбрать MP3…")
+        self.select_button.clicked.connect(self._select_main_file)
+        main_row_layout.addWidget(self.select_button)
+        self.clear_main_button = QPushButton("Очистить")
+        self.clear_main_button.clicked.connect(self._clear_main_file)
+        main_row_layout.addWidget(self.clear_main_button)
+        layout.addWidget(main_row)
+
+        self.settings_container = QGroupBox()
+        self.settings_container.setTitle("")
+        self.settings_layout = QFormLayout(self.settings_container)
+        self.settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.track_id_label = QLabel("-")
+        self.settings_layout.addRow("ID трека:", self.track_id_label)
+
+        sec_widget = QWidget()
+        sec_layout = QHBoxLayout(sec_widget)
+        sec_layout.setContentsMargins(0, 0, 0, 0)
+        self.secondary_label = QLabel("Не выбран")
+        sec_layout.addWidget(self.secondary_label)
+        sec_layout.addStretch(1)
+        self.secondary_button = QPushButton("Добавить MP3…")
+        self.secondary_button.clicked.connect(self._select_secondary_file)
+        sec_layout.addWidget(self.secondary_button)
+        self.clear_secondary_button = QPushButton("Очистить")
+        self.clear_secondary_button.clicked.connect(self._clear_secondary_file)
+        sec_layout.addWidget(self.clear_secondary_button)
+        self.settings_layout.addRow("Доп. аудиотрек:", sec_widget)
+
+        self.extra_ids_edit = QLineEdit()
+        self.extra_ids_edit.setPlaceholderText("Например: 101, 131")
+        self.settings_layout.addRow("Дополнительные ID:", self.extra_ids_edit)
+
+        self.interruptible_box = QCheckBox("Прерываемый")
+        self.interruptible_box.setChecked(True)
+        self.reset_box = QCheckBox("Сброс")
+        self.play_once_box = QCheckBox("Играть единожды")
+        flags_widget = QWidget()
+        flags_layout = QHBoxLayout(flags_widget)
+        flags_layout.setContentsMargins(0, 0, 0, 0)
+        flags_layout.addWidget(self.interruptible_box)
+        flags_layout.addWidget(self.reset_box)
+        flags_layout.addWidget(self.play_once_box)
+        flags_layout.addStretch(1)
+        self.settings_layout.addRow(flags_widget)
+
+        layout.addWidget(self.settings_container)
+
+        self._update_state()
+        if data:
+            self.set_data(data)
+
+    def set_data(self, data):
+        if not data:
+            self._clear_main_file()
+            return
+        self.main_file_info = {
+            'filename': data.get('filename'),
+            'data': data.get('data'),
+            'duration_ms': data.get('duration_ms', 0)
+        }
+        self.secondary_file_info = None
+        if data.get('secondary'):
+            sec = data['secondary']
+            self.secondary_file_info = {
+                'filename': sec.get('filename'),
+                'data': sec.get('data'),
+                'duration_ms': sec.get('duration_ms', 0)
+            }
+        self.extra_ids_edit.setText(', '.join(str(x) for x in data.get('extra_ids', [])))
+        self.interruptible_box.setChecked(data.get('interruptible', True))
+        self.reset_box.setChecked(data.get('reset', False))
+        self.play_once_box.setChecked(data.get('play_once', False))
+        self._update_state()
+
+    def get_data(self):
+        if not self.main_file_info:
+            return None
+        result = {
+            'filename': self.main_file_info['filename'],
+            'data': self.main_file_info['data'],
+            'duration_ms': self.main_file_info.get('duration_ms', 0),
+            'extra_ids': parse_additional_ids(self.extra_ids_edit.text()),
+            'interruptible': self.interruptible_box.isChecked(),
+            'reset': self.reset_box.isChecked(),
+            'play_once': self.play_once_box.isChecked()
+        }
+        if self.secondary_file_info:
+            result['secondary'] = {
+                'filename': self.secondary_file_info['filename'],
+                'data': self.secondary_file_info['data'],
+                'duration_ms': self.secondary_file_info.get('duration_ms', 0)
+            }
+        return result
+
+    def _select_main_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать аудио", "", "MP3 файлы (*.mp3)")
+        if not path:
+            return
+        try:
+            info = load_audio_file_info(path)
+        except ValueError as err:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
+            return
+        self.main_file_info = info
+        if not self.interruptible_box.isChecked():
+            self.interruptible_box.setChecked(True)
+        self._update_state()
+
+    def _select_secondary_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Выбрать дополнительный аудио", "", "MP3 файлы (*.mp3)")
+        if not path:
+            return
+        try:
+            info = load_audio_file_info(path)
+        except ValueError as err:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
+            return
+        self.secondary_file_info = info
+        self._update_state()
+
+    def _clear_main_file(self):
+        self.main_file_info = None
+        self.secondary_file_info = None
+        self.extra_ids_edit.clear()
+        self.interruptible_box.setChecked(True)
+        self.reset_box.setChecked(False)
+        self.play_once_box.setChecked(False)
+        self._update_state()
+
+    def _clear_secondary_file(self):
+        self.secondary_file_info = None
+        self._update_state()
+
+    def _update_state(self):
+        has_main = self.main_file_info is not None
+        self.clear_main_button.setEnabled(has_main)
+        self.settings_container.setVisible(has_main)
+        self.secondary_button.setEnabled(has_main)
+        self.clear_secondary_button.setEnabled(has_main and self.secondary_file_info is not None)
+        if has_main:
+            filename = self.main_file_info.get('filename', 'Не выбран')
+            self.main_file_label.setText(filename)
+            self.track_id_label.setText(filename)
+        else:
+            self.main_file_label.setText("Не выбран")
+            self.track_id_label.setText("-")
+        if self.secondary_file_info:
+            self.secondary_label.setText(self.secondary_file_info.get('filename', ''))
+        else:
+            self.secondary_label.setText("Не выбран")
 
 # ---------------------------------------------------------------------------
 # Universal parameter dialog
@@ -107,10 +333,11 @@ def getHallParameters(default_num=1, default_name="", default_w=1.0, default_h=1
         return v["Номер зала"], v["Название зала"], v["Ширина (м)"], v["Высота (м)"]
     return None
 
-def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_bound=False):
+# Z ВВОДИМ В МЕТРАХ
+def getAnchorParameters(default_num=1, default_z_m=0.0, default_extras="", default_bound=False):
     fields = [
         {"label": "Номер якоря", "type": "int", "default": default_num, "min": 0, "max": 10000},
-        {"label": "Координата Z (см)", "type": "int", "default": default_z, "min": -10000, "max": 10000},
+        {"label": "Координата Z (м)", "type": "float", "default": default_z_m, "min": -100.0, "max": 100.0, "decimals": 1},
         {"label": "Дополнительные залы (через запятую)", "type": "string", "default": default_extras},
         {"label": "Переходный", "type": "bool", "default": default_bound}
     ]
@@ -118,7 +345,7 @@ def getAnchorParameters(default_num=1, default_z=0, default_extras="", default_b
     if dlg.exec() == QDialog.Accepted:
         v = dlg.getValues()
         extras = [int(tok) for tok in v["Дополнительные залы (через запятую)"].split(",") if tok.strip().isdigit()]
-        return v["Номер якоря"], v["Координата Z (см)"], extras, v["Переходный"]
+        return v["Номер якоря"], float(v["Координата Z (м)"]), extras, v["Переходный"]
     return None
 
 def getZoneParameters(default_num=1, default_type="Входная зона", default_angle=0):
@@ -137,6 +364,137 @@ def getZoneParameters(default_num=1, default_type="Входная зона", def
     return None
 
 # ---------------------------------------------------------------------------
+# Edit dialogs with audio controls
+# ---------------------------------------------------------------------------
+class HallEditDialog(QDialog):
+    def __init__(self, hall_item, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать зал")
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(hall_item.number)
+        form.addRow("Номер зала", self.num_spin)
+
+        self.name_edit = QLineEdit()
+        self.name_edit.setText(hall_item.name)
+        form.addRow("Название зала", self.name_edit)
+
+        ppcm = hall_item.scene().pixel_per_cm_x if hall_item.scene() else 1.0
+        width_m = hall_item.rect().width()/(ppcm*100)
+        height_m = hall_item.rect().height()/(ppcm*100)
+
+        self.width_spin = QDoubleSpinBox()
+        self.width_spin.setDecimals(1)
+        self.width_spin.setRange(0.1, 1000.0)
+        self.width_spin.setValue(width_m)
+        form.addRow("Ширина (м)", self.width_spin)
+
+        self.height_spin = QDoubleSpinBox()
+        self.height_spin.setDecimals(1)
+        self.height_spin.setRange(0.1, 1000.0)
+        self.height_spin.setValue(height_m)
+        form.addRow("Высота (м)", self.height_spin)
+
+        self.audio_widget = AudioTrackWidget(self, hall_item.audio_settings)
+        layout.addWidget(self.audio_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        return {
+            'number': self.num_spin.value(),
+            'name': self.name_edit.text(),
+            'width': self.width_spin.value(),
+            'height': self.height_spin.value(),
+            'audio': self.audio_widget.get_data()
+        }
+
+
+class ZoneEditDialog(QDialog):
+    def __init__(self, zone_item, audio_data=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Редактировать зону")
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(zone_item.zone_num)
+        form.addRow("Номер зоны", self.num_spin)
+
+        self.type_combo = QComboBox()
+        options = ["Входная", "Выходная", "Переходная"]
+        for opt in options:
+            self.type_combo.addItem(opt)
+        current = zone_item.zone_type.replace(" зона", "")
+        if current in options:
+            self.type_combo.setCurrentIndex(options.index(current))
+        form.addRow("Тип зоны", self.type_combo)
+
+        data = zone_item.get_export_data() or {"x":0.0,"y":0.0,"w":0.0,"h":0.0,"angle":0}
+
+        self.x_spin = QDoubleSpinBox()
+        self.x_spin.setDecimals(1)
+        self.x_spin.setRange(-1000.0, 1000.0)
+        self.x_spin.setValue(data['x'])
+
+        self.y_spin = QDoubleSpinBox()
+        self.y_spin.setDecimals(1)
+        self.y_spin.setRange(-1000.0, 1000.0)
+        self.y_spin.setValue(data['y'])
+
+        self.w_spin = QDoubleSpinBox()
+        self.w_spin.setDecimals(1)
+        self.w_spin.setRange(0.0, 1000.0)
+        self.w_spin.setValue(data['w'])
+
+        self.h_spin = QDoubleSpinBox()
+        self.h_spin.setDecimals(1)
+        self.h_spin.setRange(0.0, 1000.0)
+        self.h_spin.setValue(data['h'])
+
+        form.addRow("Координата X (м)", self.x_spin)
+        form.addRow("Координата Y (м)", self.y_spin)
+        form.addRow("Ширина (м)", self.w_spin)
+        form.addRow("Высота (м)", self.h_spin)
+
+        self.angle_spin = QSpinBox()
+        self.angle_spin.setRange(-90, 90)
+        self.angle_spin.setValue(int(data['angle']))
+        form.addRow("Угол поворота (°)", self.angle_spin)
+
+        self.audio_widget = AudioTrackWidget(self, audio_data)
+        layout.addWidget(self.audio_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def values(self):
+        full_type = {"Входная": "Входная зона", "Выходная": "Выходная зона", "Переходная": "Переходная"}[self.type_combo.currentText()]
+        return {
+            'zone_num': self.num_spin.value(),
+            'zone_type': full_type,
+            'x': self.x_spin.value(),
+            'y': self.y_spin.value(),
+            'w': self.w_spin.value(),
+            'h': self.h_spin.value(),
+            'angle': self.angle_spin.value(),
+            'audio': self.audio_widget.get_data()
+        }
+
+# ---------------------------------------------------------------------------
 # HallItem
 # ---------------------------------------------------------------------------
 class HallItem(QGraphicsRectItem):
@@ -148,6 +506,10 @@ class HallItem(QGraphicsRectItem):
         self.setPen(QPen(QColor(0,0,255),2)); self.setBrush(QColor(0,0,255,50))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(-w_px*h_px); self.tree_item = None
+        self.audio_settings = None
+        self.zone_audio_tracks = {}
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -170,6 +532,11 @@ class HallItem(QGraphicsRectItem):
             if step>0:
                 new.setX(round(new.x()/step)*step)
                 new.setY(round(new.y()/step)*step)
+            delta = new - self.pos()
+            if not delta.isNull():
+                for child in self.childItems():
+                    if isinstance(child, RectZoneItem):
+                        child.moveBy(-delta.x(), -delta.y())
             return new
         return super().itemChange(change, value)
 
@@ -179,30 +546,41 @@ class HallItem(QGraphicsRectItem):
         mw = self.scene().mainwindow
         ppcm = self.scene().pixel_per_cm_x
         menu = QMenu()
-        header = menu.addAction(f"Зал {self.number}"); header.setEnabled(False)
+        hall_title = f"Зал {self.number}"
+        if self.name:
+            hall_title += f" — {self.name}"
+        header = menu.addAction(hall_title); header.setEnabled(False)
+        audio_info_text = self._get_audio_info_text()
+        if audio_info_text:
+            audio_line = menu.addAction(audio_info_text)
+            audio_line.setEnabled(False)
         edit = menu.addAction("Редактировать зал")
         delete = menu.addAction("Удалить зал")
         act = menu.exec(global_pos)
         if act == edit:
-            # current dims in meters
-            w_m = self.rect().width()/(ppcm*100)
-            h_m = self.rect().height()/(ppcm*100)
-            params = getHallParameters(self.number, self.name, w_m, h_m, self.scene())
-            if params:
-                new_num, new_name, new_w_m, new_h_m = params
+            dlg = HallEditDialog(self, mw)
+            if dlg.exec() == QDialog.Accepted:
+                prev_state = mw.capture_state()
+                values = dlg.values()
+                new_num = values['number']
+                new_name = values['name']
+                new_w_m = values['width']
+                new_h_m = values['height']
+                self.audio_settings = values['audio']
                 old = self.number
                 for a in mw.anchors:
                     if a.main_hall_number == old:
                         a.main_hall_number = new_num
                     a.extra_halls = [new_num if x==old else x for x in a.extra_halls]
                 self.number, self.name = new_num, new_name
-                # resize in pixels
                 w_px = new_w_m * ppcm * 100
                 h_px = new_h_m * ppcm * 100
                 self.prepareGeometryChange()
                 self.setRect(0, 0, w_px, h_px)
                 self.setZValue(-w_px*h_px)
-                mw.last_selected_items = []; mw.populate_tree()
+                mw.last_selected_items = []
+                mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
             anchors_rel = [a for a in mw.anchors if a.main_hall_number==self.number or self.number in a.extra_halls]
             zones_rel = [z for z in self.childItems() if isinstance(z, RectZoneItem)]
@@ -213,6 +591,7 @@ class HallItem(QGraphicsRectItem):
                                             QMessageBox.Yes|QMessageBox.No)
                 if resp != QMessageBox.Yes:
                     return
+            prev_state = mw.capture_state()
             for z in zones_rel:
                 z.scene().removeItem(z)
             for a in anchors_rel:
@@ -225,8 +604,66 @@ class HallItem(QGraphicsRectItem):
                     a.extra_halls.remove(self.number)
             mw.halls.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+            mw.push_undo_state(prev_state)
+
+    def _get_audio_info_text(self) -> str | None:
+        return format_audio_menu_line(self.audio_settings)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                event.ignore()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                event.ignore()
+                return
+            mw = self.scene().mainwindow
+            if mw and not getattr(mw, "_restoring_state", False):
+                self._undo_initial_pos = QPointF(self.pos())
+                self._undo_snapshot = mw.capture_state()
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
+        if self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                zone.open_menu(event.screenPos())
+                event.accept()
+                return
+        self.open_menu(event.screenPos())
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.pos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
+
+    def contextMenuEvent(self, event):
+        # ПКМ: приоритет — якорь, затем (внутренняя) зона, затем зал
+        if self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            zone = _smallest_zone(self.scene(), event.scenePos())
+            if zone:
+                zone.open_menu(event.screenPos())
+                event.accept()
+                return
         self.open_menu(event.screenPos())
         event.accept()
 
@@ -242,6 +679,13 @@ class AnchorItem(QGraphicsEllipseItem):
         self.setPen(QPen(QColor(255,0,0),2)); self.setBrush(QBrush(QColor(255,0,0)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
+        self.update_zvalue()
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
+
+    def update_zvalue(self):
+        anchor_number = float(self.number) if isinstance(self.number, (int, float)) else 0.0
+        self.setZValue(10000.0 + anchor_number * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -262,7 +706,55 @@ class AnchorItem(QGraphicsEllipseItem):
                 new.setX(round(new.x()/step)*step)
                 new.setY(round(new.y()/step)*step)
             return new
+        if change == QGraphicsItem.ItemPositionHasChanged:
+            self.update_zvalue()
         return super().itemChange(change, value)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.update_zvalue()
+            scene = self.scene()
+            if scene and not (event.modifiers() & Qt.ControlModifier):
+                scene.clearSelection()
+            self.setSelected(True)
+            if scene:
+                mw = scene.mainwindow
+                if mw and not getattr(mw, "_restoring_state", False):
+                    self._undo_initial_pos = QPointF(self.scenePos())
+                    self._undo_snapshot = mw.capture_state()
+        super().mousePressEvent(event)
+        event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() & Qt.LeftButton:
+            self.update_zvalue()
+        super().mouseMoveEvent(event)
+        event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        self.update_zvalue()
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.scenePos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event):
+        # Всегда открываем меню якоря при двойном клике по якорю
+        self.update_zvalue()
+        self.open_menu(event.screenPos())
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        # ПКМ на якоре — его же меню, даже если он перекрыт другими
+        self.update_zvalue()
+        self.open_menu(event.screenPos())
+        event.accept()
 
     def open_menu(self, global_pos: QPoint):
         if not self.scene(): return
@@ -284,14 +776,15 @@ class AnchorItem(QGraphicsEllipseItem):
         if act == edit:
             fields = [
                 {"label": "Номер якоря", "type": "int", "default": self.number, "min": 0, "max": 10000},
-                {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
+                {"label":"Координата X (м)","type":"float","default":x_m,"min":-1000.0,"max":10000,"decimals":1},
+                {"label":"Координата Y (м)","type":"float","default":y_m,"min":-1000.0,"max":10000,"decimals":1},
                 {"label":"Координата Z (м)","type":"float","default":z_m,"min":-100,"max":100,"decimals":1},
                 {"label":"Доп. залы","type":"string","default":",".join(str(x) for x in self.extra_halls)},
                 {"label":"Переходный","type":"bool","default":self.bound}
             ]
             dlg = ParamDialog("Редактировать якорь", fields, mw)
             if dlg.exec() == QDialog.Accepted:
+                prev_state = mw.capture_state()
                 v = dlg.getValues()
                 self.number = v["Номер якоря"]
                 x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
@@ -301,14 +794,22 @@ class AnchorItem(QGraphicsEllipseItem):
                 px = x2 * ppcm * 100
                 py = hall.rect().height() - y2 * ppcm * 100
                 self.setPos(hall.mapToScene(QPointF(px, py)))
+                self.update_zvalue()
                 mw.last_selected_items = []; mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
+            confirm = QMessageBox.question(
+                mw,
+                "Подтвердить",
+                f"Удалить якорь {self.number} ({halls_str})?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            prev_state = mw.capture_state()
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
-
-    def mouseDoubleClickEvent(self, event):
-        self.open_menu(event.screenPos())
-        event.accept()
+            mw.push_undo_state(prev_state)
 
 # ---------------------------------------------------------------------------
 # ZoneItem
@@ -323,7 +824,16 @@ class RectZoneItem(QGraphicsRectItem):
         else:
             self.setPen(QPen(QColor(128,0,128),2)); self.setBrush(QBrush(QColor(128,0,128,50)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
-        self.setZValue(-w*h); self.tree_item = None
+        self.tree_item = None
+        self.update_zvalue()
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
+
+    def update_zvalue(self):
+        hall = self.parentItem()
+        hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, 'number') else 0
+        zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
+        self.setZValue(5000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -358,65 +868,228 @@ class RectZoneItem(QGraphicsRectItem):
         mw = scene.mainwindow
         data = self.get_export_data()
         if data is None: return
-        x_m, y_m, w_m, h_m, angle = data["x"], data["y"], data["w"], data["h"], data["angle"]
         menu = QMenu()
-        header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()})"); header.setEnabled(False)
+        hall = self.parentItem()
+        hall_suffix = ""
+        if isinstance(hall, HallItem):
+            hall_suffix = f" — зал {hall.number}"
+        header = menu.addAction(f"Зона {self.zone_num} ({self.get_display_type()}){hall_suffix}"); header.setEnabled(False)
+        audio_info = None
+        if isinstance(hall, HallItem):
+            audio_info = hall.zone_audio_tracks.get(self.zone_num)
+        if audio_info:
+            audio_line = format_audio_menu_line(audio_info)
+            if audio_line:
+                track_action = menu.addAction(audio_line)
+                track_action.setEnabled(False)
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
-            fields = [
-                {"label": "Номер зоны", "type": "int", "default": self.zone_num, "min": 0, "max": 10000},
-                {"label":"Координата X (м)","type":"float","default":x_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Координата Y (м)","type":"float","default":y_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Ширина (м)","type":"float","default":w_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Высота (м)","type":"float","default":h_m,"min":0,"max":10000,"decimals":1},
-                {"label":"Тип зоны","type":"combo","default": self.zone_type.replace(" зона",""),
-                 "options":["Входная","Выходная","Переходная"]},
-                {"label":"Угол поворота (°)","type":"int","default":int(angle),"min":-90,"max":90}
-            ]
-            dlg = ParamDialog("Редактировать зону", fields, mw)
+            hall = self.parentItem()
+            if not hall:
+                return
+            current_audio = hall.zone_audio_tracks.get(self.zone_num) if hall else None
+            dlg = ZoneEditDialog(self, current_audio, mw)
             if dlg.exec() == QDialog.Accepted:
-                v = dlg.getValues()
-                self.zone_num = v["Номер зоны"]
-                x2, y2, w2, h2 = v["Координата X (м)"], v["Координата Y (м)"], v["Ширина (м)"], v["Высота (м)"]
-                t2 = v["Тип зоны"]
-                full = {"Входная":"Входная зона","Выходная":"Выходная зона","Переходная":"Переходная"}[t2]
-                ang2 = v["Угол поворота (°)"]
-                hall = self.parentItem()
+                prev_state = mw.capture_state()
+                values = dlg.values()
+                old_num = self.zone_num
+                self.zone_num = values['zone_num']
+                self.zone_type = values['zone_type']
+                self.zone_angle = values['angle']
+                self.update_zvalue()
+                if self.zone_type in ("Входная зона", "Переходная"):
+                    self.setPen(QPen(QColor(0,128,0),2))
+                    self.setBrush(QBrush(QColor(0,128,0,50)))
+                else:
+                    self.setPen(QPen(QColor(128,0,128),2))
+                    self.setBrush(QBrush(QColor(128,0,128,50)))
                 ppcm = scene.pixel_per_cm_x
-                self.setRect(0, -h2*ppcm*100, w2*ppcm*100, h2*ppcm*100)
-                self.setTransformOriginPoint(0,0); self.setRotation(-ang2)
-                self.zone_type, self.zone_angle = full, ang2
-                px = x2 * ppcm * 100
-                py = hall.rect().height() - y2 * ppcm * 100
+                w_px = values['w'] * ppcm * 100
+                h_px = values['h'] * ppcm * 100
+                self.prepareGeometryChange()
+                self.setRect(0, -h_px, w_px, h_px)
+                self.setTransformOriginPoint(0,0)
+                self.setRotation(-self.zone_angle)
+                px = values['x'] * ppcm * 100
+                py = hall.rect().height() - values['y'] * ppcm * 100
                 self.setPos(QPointF(px, py))
-                mw.last_selected_items = []; mw.populate_tree()
+                self.update_zvalue()
+                audio_data = values['audio']
+                if audio_data:
+                    hall.zone_audio_tracks[self.zone_num] = audio_data
+                else:
+                    hall.zone_audio_tracks.pop(self.zone_num, None)
+                if old_num != self.zone_num:
+                    others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == old_num and z is not self]
+                    if not others:
+                        hall.zone_audio_tracks.pop(old_num, None)
+                mw.last_selected_items = []
+                mw.populate_tree()
+                mw.push_undo_state(prev_state)
         elif act == delete:
+            confirm = QMessageBox.question(
+                mw,
+                "Подтвердить",
+                f"Удалить зону {self.zone_num} ({self.get_display_type()})?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            prev_state = mw.capture_state()
+            hall = self.parentItem()
+            if hall:
+                others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == self.zone_num and z is not self]
+                if not others:
+                    hall.zone_audio_tracks.pop(self.zone_num, None)
             scene.removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
+            mw.push_undo_state(prev_state)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self.scene():
+            anchor = _top_anchor(self.scene(), event.scenePos())
+            if anchor:
+                event.ignore()
+                return
+            smaller = _smallest_zone(self.scene(), event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                event.ignore()
+                return
+            mw = self.scene().mainwindow
+            if mw and not getattr(mw, "_restoring_state", False):
+                self._undo_initial_pos = QPointF(self.scenePos())
+                self._undo_snapshot = mw.capture_state()
+        super().mousePressEvent(event)
 
     def mouseDoubleClickEvent(self, event):
         scene = self.scene()
         if scene:
-            # выбрать меньшую, если наложены
-            zlist = [z for z in scene.items(event.scenePos())
-                     if isinstance(z,RectZoneItem) and z.contains(z.mapFromScene(event.scenePos()))]
-            if zlist:
-                smaller = [z for z in zlist if z is not self and (z.rect().width()*z.rect().height() < self.rect().width()*self.rect().height())]
-                if smaller:
-                    min(smaller, key=lambda z: z.rect().width()*z.rect().height()).open_menu(event.screenPos())
-                    event.accept(); return
+            anchor = _top_anchor(scene, event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            smaller = _smallest_zone(scene, event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                smaller.open_menu(event.screenPos())
+                event.accept()
+                return
         self.open_menu(event.screenPos())
         event.accept()
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.LeftButton and self.scene():
+            if self._undo_snapshot is not None and self._undo_initial_pos is not None:
+                if self.scenePos() != self._undo_initial_pos:
+                    mw = self.scene().mainwindow
+                    if mw:
+                        mw.push_undo_state(self._undo_snapshot)
+        self._undo_snapshot = None
+        self._undo_initial_pos = None
+
+    def contextMenuEvent(self, event):
+        # ПКМ: приоритет — якорь → меньшая зона → текущая зона
+        scene = self.scene()
+        if scene:
+            anchor = _top_anchor(scene, event.scenePos())
+            if anchor:
+                anchor.open_menu(event.screenPos())
+                event.accept()
+                return
+            smaller = _smallest_zone(scene, event.scenePos(), exclude=self, max_area=_zone_area(self))
+            if smaller:
+                smaller.open_menu(event.screenPos())
+                event.accept()
+                return
+        self.open_menu(event.screenPos())
+        event.accept()
+
+
+def _zone_area(zone):
+    rect = zone.boundingRect()
+    return abs(rect.width() * rect.height())
+
+def _top_anchor(scene, pos):
+    if scene is None:
+        return None
+    # Точное попадание по форме якоря; возьмем верхний по Z
+    for item in scene.items(pos, Qt.ContainsItemShape):
+        if isinstance(item, AnchorItem):
+            return item
+    return None
+
+def _smallest_zone(scene, pos, exclude=None, max_area=None):
+    if scene is None:
+        return None
+    best = None
+    best_area = None
+    for item in scene.items(pos, Qt.IntersectsItemShape):
+        if isinstance(item, RectZoneItem) and item is not exclude:
+            rect = item.boundingRect()
+            area = abs(rect.width() * rect.height())
+            if max_area is not None and area >= max_area:
+                continue
+            if best is None or area < best_area:
+                best = item
+                best_area = area
+    return best
 
 # ---------------------------------------------------------------------------
 # Custom view and scene
 # ---------------------------------------------------------------------------
 class MyGraphicsView(QGraphicsView):
+    def __init__(self, scene):
+        super().__init__(scene)
+        self._panning = False
+        self._pan_start = QPoint()
+        self.viewport().setCursor(Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        scene = self.scene()
+        mw = scene.mainwindow if scene else None
+        if event.button() in (Qt.LeftButton, Qt.MiddleButton):
+            should_pan = False
+            if event.button() == Qt.MiddleButton:
+                should_pan = True
+            elif event.button() == Qt.LeftButton:
+                if not (mw and mw.add_mode):
+                    point = event.position().toPoint()
+                    if self.itemAt(point) is None:
+                        should_pan = True
+            if should_pan:
+                self._panning = True
+                self._pan_start = event.position().toPoint()
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            pos = event.position().toPoint()
+            delta = pos - self._pan_start
+            self._pan_start = pos
+            hbar = self.horizontalScrollBar()
+            vbar = self.verticalScrollBar()
+            hbar.setValue(hbar.value() - delta.x())
+            vbar.setValue(vbar.value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
     def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        try: QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
-        except: pass
+        if self._panning and event.button() in (Qt.LeftButton, Qt.MiddleButton):
+            self._panning = False
+            self.viewport().setCursor(Qt.ArrowCursor)
+            event.accept()
+        else:
+            super().mouseReleaseEvent(event)
+        try:
+            QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
+        except:
+            pass
 
 class PlanGraphicsScene(QGraphicsScene):
     def __init__(self):
@@ -428,6 +1101,8 @@ class PlanGraphicsScene(QGraphicsScene):
     def set_background_image(self, pix):
         self.pixmap = pix
         self.setSceneRect(0, 0, pix.width(), pix.height())
+        if self.mainwindow:
+            self.mainwindow._reset_background_cache()
 
     def drawBackground(self, painter, rect):
         if self.pixmap:
@@ -450,15 +1125,18 @@ class PlanGraphicsScene(QGraphicsScene):
             y += step
 
     def finishCalibration(self, start, end):
+        mw = self.mainwindow
+        if not mw:
+            return
+        prev_state = mw.capture_state()
         diff = math.hypot(end.x()-start.x(), end.y()-start.y())
         length_cm, ok = QInputDialog.getDouble(
-            self.mainwindow, "Калибровка масштаба",
+            mw, "Калибровка масштаба",
             "Введите длину отрезка (см):", 100.0, 0.1, 10000.0, 1
         )
         if ok and length_cm:
             scale = diff / length_cm
             self.pixel_per_cm_x = self.pixel_per_cm_y = scale
-        mw = self.mainwindow
         mw.add_mode = None; mw.temp_start_point = None
         if self.temp_item:
             self.removeItem(self.temp_item); self.temp_item = None
@@ -468,6 +1146,7 @@ class PlanGraphicsScene(QGraphicsScene):
         )
         if ok: self.grid_step_cm = float(step)
         mw.resnap_objects(); self.update()
+        mw.push_undo_state(prev_state)
 
     def mousePressEvent(self, event):
         mw = self.mainwindow; pos = event.scenePos()
@@ -510,11 +1189,14 @@ class PlanGraphicsScene(QGraphicsScene):
                 params = mw.get_anchor_parameters()
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
-                num, z, extras, bound = params
+                prev_state = mw.capture_state()
+                num, z_m, extras, bound = params  # z в метрах
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
-                a.z, a.extra_halls, a.bound = z, extras, bound
+                a.z = int(round(z_m * 100))       # храним в см
+                a.extra_halls, a.bound = extras, bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
+                mw.push_undo_state(prev_state)
                 return
         super().mousePressEvent(event)
 
@@ -546,6 +1228,7 @@ class PlanGraphicsScene(QGraphicsScene):
             if x1==x0: x1=x0+step
             if y1==y0: y1=y0+step
             w_px, h_px = x1-x0, y1-y0
+            prev_state = mw.capture_state()
             hall = HallItem(x0, y0, w_px, h_px, "", 0, scene=self)
             self.addItem(hall); mw.halls.append(hall)
             # prompt parameters
@@ -563,6 +1246,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 hall.prepareGeometryChange()
                 hall.setRect(0,0,w2_px,h2_px)
                 hall.setZValue(-w2_px*h2_px)
+                mw.push_undo_state(prev_state)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
@@ -589,17 +1273,44 @@ class PlanGraphicsScene(QGraphicsScene):
                 if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
                 mw.temp_start_point=None; mw.add_mode=None
                 return
+            prev_state = mw.capture_state()
             num, zt, ang = params
             RectZoneItem(bl, w_pix, h_pix, num, zt, ang, hall)
             mw.last_selected_items=[]; mw.populate_tree()
             mw.temp_start_point=None; mw.add_mode=None; mw.current_hall_for_zone=None
             if self.temp_item: self.removeItem(self.temp_item); self.temp_item=None
+            mw.push_undo_state(prev_state)
             return
 
         super().mouseReleaseEvent(event)
         try:
             mw.populate_tree()
-            if not self.selectedItems():
+            handled = False
+            if (event.button() == Qt.LeftButton and mw and not mw.add_mode):
+                down = event.buttonDownScenePos(Qt.LeftButton) if hasattr(event, "buttonDownScenePos") else pos
+                diff = pos - down
+                if abs(diff.x()) < 2 and abs(diff.y()) < 2:
+                    items_at = [it for it in self.items(pos, Qt.IntersectsItemShape)
+                                 if it.flags() & QGraphicsItem.ItemIsSelectable]
+                    if items_at:
+                        def item_area(it):
+                            if isinstance(it, QGraphicsRectItem):
+                                rect = it.rect()
+                                return abs(rect.width()*rect.height())
+                            br = it.boundingRect()
+                            return abs(br.width()*br.height())
+                        def priority(it):
+                            return 0 if isinstance(it, (AnchorItem, RectZoneItem)) else 1
+                        chosen = min(items_at, key=lambda it: (item_area(it), priority(it)))
+                        if not (event.modifiers() & Qt.ControlModifier):
+                            for selected in list(self.selectedItems()):
+                                if selected is not chosen:
+                                    selected.setSelected(False)
+                        chosen.setSelected(True)
+                        mw.last_selected_items = list(self.selectedItems()) or [chosen]
+                        mw.on_scene_selection_changed()
+                        handled = True
+            if not handled and not self.selectedItems():
                 clicked = self.itemAt(pos, self.views()[0].transform())
                 if clicked:
                     clicked.setSelected(True)
@@ -635,7 +1346,11 @@ class PlanEditorMainWindow(QMainWindow):
         act_cal = QAction("Выполнить калибровку", self)
         toolbar.addAction(act_open); toolbar.addAction(act_cal); toolbar.addSeparator()
         act_save = QAction("Сохранить проект", self); act_load = QAction("Загрузить проект", self)
-        toolbar.addAction(act_save); toolbar.addAction(act_load); toolbar.addSeparator()
+        toolbar.addAction(act_save); toolbar.addAction(act_load)
+        self.undo_action = QAction("Отменить", self)
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
+        toolbar.addAction(self.undo_action); toolbar.addSeparator()
         act_add_hall = QAction("Добавить зал", self)
         act_add_anchor = QAction("Добавить якорь", self)
         act_add_zone = QAction("Добавить зону", self)
@@ -654,6 +1369,7 @@ class PlanEditorMainWindow(QMainWindow):
         act_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
         act_add_zone.triggered.connect(lambda: self.set_mode("zone"))
         self.act_lock.triggered.connect(self.lock_objects)
+        self.undo_action.triggered.connect(self.undo_last_action)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -662,17 +1378,195 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_halls = False; self.lock_zones = False; self.lock_anchors = False
         self.last_selected_items = []
         self.current_project_file = None
+        self.undo_stack = []
+        self._undo_limit = 30
+        self._restoring_state = False
+        self._undo_bg_cache_key = None
+        self._undo_bg_image = ""
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
-        self.view.setDragMode(QGraphicsView.RubberBandDrag)
+        self.view.setDragMode(QGraphicsView.NoDrag)
         self.view.wheelEvent = self.handle_wheel_event
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
+        self.update_undo_action()
+
+    def _reset_background_cache(self):
+        self._undo_bg_cache_key = None
+        self._undo_bg_image = ""
+
+    def capture_state(self):
+        data = {
+            "image_data": "",
+            "pixel_per_cm_x": self.scene.pixel_per_cm_x,
+            "pixel_per_cm_y": self.scene.pixel_per_cm_y,
+            "grid_step_cm": self.scene.grid_step_cm,
+            "grid_calibrated": self.grid_calibrated,
+            "lock_halls": self.lock_halls,
+            "lock_zones": self.lock_zones,
+            "lock_anchors": self.lock_anchors,
+            "current_project_file": self.current_project_file,
+            "halls": [],
+            "anchors": []
+        }
+        if self.scene.pixmap:
+            cache_key = self.scene.pixmap.cacheKey()
+            if self._undo_bg_cache_key == cache_key and self._undo_bg_image:
+                data["image_data"] = self._undo_bg_image
+            else:
+                buf = QBuffer(); buf.open(QBuffer.WriteOnly)
+                self.scene.pixmap.save(buf, "PNG")
+                encoded = buf.data().toBase64().data().decode()
+                data["image_data"] = encoded
+                self._undo_bg_cache_key = cache_key
+                self._undo_bg_image = encoded
+        else:
+            self._reset_background_cache()
+        for hall in self.halls:
+            hall_data = {
+                "num": hall.number,
+                "name": hall.name,
+                "x_px": hall.pos().x(),
+                "y_px": hall.pos().y(),
+                "w_px": hall.rect().width(),
+                "h_px": hall.rect().height(),
+                "audio": copy.deepcopy(hall.audio_settings) if hall.audio_settings else None,
+                "zone_audio": {str(k): copy.deepcopy(v) for k, v in hall.zone_audio_tracks.items()}
+            }
+            zones = []
+            for child in hall.childItems():
+                if isinstance(child, RectZoneItem):
+                    zones.append({
+                        "zone_num": child.zone_num,
+                        "zone_type": child.zone_type,
+                        "zone_angle": child.zone_angle,
+                        "bottom_left_x": child.pos().x(),
+                        "bottom_left_y": child.pos().y(),
+                        "w_px": child.rect().width(),
+                        "h_px": child.rect().height()
+                    })
+            hall_data["zones"] = zones
+            data["halls"].append(hall_data)
+        for anchor in self.anchors:
+            anchor_data = {
+                "number": anchor.number,
+                "z": anchor.z,
+                "x": anchor.scenePos().x(),
+                "y": anchor.scenePos().y(),
+                "main_hall": anchor.main_hall_number,
+                "extra_halls": list(anchor.extra_halls),
+                "bound": anchor.bound
+            }
+            data["anchors"].append(anchor_data)
+        return data
+
+    def restore_state(self, state):
+        if not state:
+            return
+        self._restoring_state = True
+        try:
+            self.scene.clear()
+            self.scene.temp_item = None
+            self.halls.clear()
+            self.anchors.clear()
+            image_data = state.get("image_data") or ""
+            if image_data:
+                ba = QByteArray.fromBase64(image_data.encode())
+                pix = QPixmap()
+                pix.loadFromData(ba, "PNG")
+                self.scene.set_background_image(pix)
+            else:
+                self.scene.pixmap = None
+                self.scene.setSceneRect(0, 0, 1000, 1000)
+                self._reset_background_cache()
+            self.scene.pixel_per_cm_x = state.get("pixel_per_cm_x", 1.0)
+            self.scene.pixel_per_cm_y = state.get("pixel_per_cm_y", 1.0)
+            self.scene.grid_step_cm = state.get("grid_step_cm", 20.0)
+            self.grid_calibrated = state.get("grid_calibrated", False)
+            self.lock_halls = state.get("lock_halls", False)
+            self.lock_zones = state.get("lock_zones", False)
+            self.lock_anchors = state.get("lock_anchors", False)
+            self.current_project_file = state.get("current_project_file")
+            for hall_data in state.get("halls", []):
+                hall = HallItem(
+                    hall_data.get("x_px", 0.0),
+                    hall_data.get("y_px", 0.0),
+                    hall_data.get("w_px", 0.0),
+                    hall_data.get("h_px", 0.0),
+                    hall_data.get("name", ""),
+                    hall_data.get("num", 0),
+                    scene=self.scene
+                )
+                hall.audio_settings = copy.deepcopy(hall_data.get("audio")) if hall_data.get("audio") else None
+                zone_audio_raw = hall_data.get("zone_audio") or {}
+                hall.zone_audio_tracks = {int(k): copy.deepcopy(v) for k, v in zone_audio_raw.items()}
+                self.scene.addItem(hall)
+                self.halls.append(hall)
+                for zone_data in hall_data.get("zones", []):
+                    bl = QPointF(zone_data.get("bottom_left_x", 0.0), zone_data.get("bottom_left_y", 0.0))
+                    RectZoneItem(
+                        bl,
+                        zone_data.get("w_px", 0.0),
+                        zone_data.get("h_px", 0.0),
+                        zone_data.get("zone_num", 0),
+                        zone_data.get("zone_type", "Входная зона"),
+                        zone_data.get("zone_angle", 0.0),
+                        hall
+                    )
+            for anchor_data in state.get("anchors", []):
+                anchor = AnchorItem(
+                    anchor_data.get("x", 0.0),
+                    anchor_data.get("y", 0.0),
+                    anchor_data.get("number", 0),
+                    main_hall_number=anchor_data.get("main_hall"),
+                    scene=self.scene
+                )
+                anchor.z = anchor_data.get("z", 0)
+                anchor.extra_halls = list(anchor_data.get("extra_halls", []))
+                anchor.bound = bool(anchor_data.get("bound", False))
+                self.scene.addItem(anchor)
+                self.anchors.append(anchor)
+            if not image_data:
+                rect = self.scene.itemsBoundingRect()
+                if rect.isValid():
+                    margin = 100
+                    self.scene.setSceneRect(rect.adjusted(-margin, -margin, margin, margin))
+            self.add_mode = None
+            self.temp_start_point = None
+            self.current_hall_for_zone = None
+            self.apply_lock_flags()
+            self.populate_tree()
+            self.statusBar().clearMessage()
+        finally:
+            self._restoring_state = False
+
+    def push_undo_state(self, state=None):
+        if self._restoring_state:
+            return
+        snapshot = state if state is not None else self.capture_state()
+        if snapshot is None:
+            return
+        self.undo_stack.append(snapshot)
+        if len(self.undo_stack) > self._undo_limit:
+            self.undo_stack.pop(0)
+        self.update_undo_action()
+
+    def undo_last_action(self):
+        if not self.undo_stack:
+            return
+        state = self.undo_stack.pop()
+        self.restore_state(state)
+        self.update_undo_action()
+        self.statusBar().showMessage("Последнее действие отменено.", 3000)
+
+    def update_undo_action(self):
+        if hasattr(self, "undo_action"):
+            self.undo_action.setEnabled(bool(self.undo_stack))
 
     # Parameter getters...
     def get_anchor_parameters(self):
         default = 1 if not self.anchors else max(a.number for a in self.anchors)+1
-        return getAnchorParameters(default, 0, "", False)
+        return getAnchorParameters(default, 0.0, "", False)  # Z по умолчанию в метрах
     def get_zone_parameters(self):
         default = 1
         if self.current_hall_for_zone:
@@ -684,8 +1578,10 @@ class PlanEditorMainWindow(QMainWindow):
     def lock_objects(self):
         dlg = LockDialog(self.lock_halls, self.lock_zones, self.lock_anchors, self)
         if dlg.exec() == QDialog.Accepted:
+            prev_state = self.capture_state()
             self.lock_halls, self.lock_zones, self.lock_anchors = dlg.values()
             self.apply_lock_flags()
+            self.push_undo_state(prev_state)
     def apply_lock_flags(self):
         for h in self.halls: h.setFlag(QGraphicsItem.ItemIsMovable, not self.lock_halls)
         for h in self.halls:
@@ -788,10 +1684,31 @@ class PlanEditorMainWindow(QMainWindow):
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key_Delete:
-            for it in self.scene.selectedItems():
-                if isinstance(it,HallItem) and it in self.halls: self.halls.remove(it)
-                if it in self.anchors: self.anchors.remove(it)
+            items = list(self.scene.selectedItems())
+            if not items:
+                return
+            prev_state = self.capture_state()
+            changed = False
+            for it in items:
+                if isinstance(it, RectZoneItem):
+                    hall = it.parentItem()
+                    if hall:
+                        others = [z for z in hall.childItems() if isinstance(z, RectZoneItem) and z.zone_num == it.zone_num and z is not it]
+                        if not others:
+                            hall.zone_audio_tracks.pop(it.zone_num, None)
+                if isinstance(it,HallItem) and it in self.halls:
+                    self.halls.remove(it)
+                    changed = True
+                elif isinstance(it, AnchorItem) and it in self.anchors:
+                    self.anchors.remove(it)
+                    changed = True
+                else:
+                    changed = changed or isinstance(it, RectZoneItem)
                 self.scene.removeItem(it)
+            if changed:
+                self.populate_tree()
+                self.push_undo_state(prev_state)
+            return
         else:
             super().keyPressEvent(event)
 
@@ -860,11 +1777,15 @@ class PlanEditorMainWindow(QMainWindow):
         pix = QPixmap(fp)
         if pix.isNull():
             QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
+        prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.pixmap = None
+        self._reset_background_cache()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
+        self.push_undo_state(prev_state)
 
     def save_project(self):
         if not self.current_project_file:
@@ -894,6 +1815,10 @@ class PlanEditorMainWindow(QMainWindow):
                 "x_px": h.pos().x(), "y_px": h.pos().y(),
                 "w_px": h.rect().width(), "h_px": h.rect().height()
             }
+            if h.audio_settings:
+                hd["audio"] = h.audio_settings
+            if h.zone_audio_tracks:
+                hd["zone_audio"] = {str(k): v for k, v in h.zone_audio_tracks.items()}
             zs = []
             for ch in h.childItems():
                 if isinstance(ch,RectZoneItem):
@@ -926,12 +1851,15 @@ class PlanEditorMainWindow(QMainWindow):
     def load_project(self):
         fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
         if not fp: return
+        prev_state = self.capture_state()
         try:
             with open(fp,"r",encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self,"Ошибка",f"Ошибка чтения:\n{e}"); return
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.pixmap = None
+        self._reset_background_cache()
         buf_data = data.get("image_data","")
         if buf_data:
             ba = QByteArray.fromBase64(buf_data.encode())
@@ -951,6 +1879,10 @@ class PlanEditorMainWindow(QMainWindow):
                 hd.get("name",""), hd.get("num",0),
                 scene=self.scene
             )
+            h.audio_settings = hd.get("audio")
+            zone_audio_raw = hd.get("zone_audio", {})
+            if zone_audio_raw:
+                h.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
             self.scene.addItem(h); self.halls.append(h)
             for zd in hd.get("zones",[]):
                 bl = QPointF(zd.get("bottom_left_x",0), zd.get("bottom_left_y",0))
@@ -975,69 +1907,204 @@ class PlanEditorMainWindow(QMainWindow):
         self.current_project_file = fp
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
+        self.push_undo_state(prev_state)
 
     def export_config(self):
-        fp,_ = QFileDialog.getSaveFileName(self,"Экспорт JSON","","*.json")
-        if not fp: return
-        config = {"rooms":[]}
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", "", "*.json")
+        if not fp:
+            return
+
+        config = {"rooms": []}
+        audio_files_map = {}
+        track_entries = []
+
+        # === helpers ===
+        def _bytes_from_b64(b64str: str) -> int:
+            if not b64str:
+                return 0
+            try:
+                return len(base64.b64decode(b64str.encode("ascii")))
+            except Exception:
+                return 0
+
+        def collect_audio_files(info):
+            """Собираем ИМЕНА и РАЗМЕРЫ (в байтах) аудиофайлов для tracks.json."""
+            if not info:
+                return
+            name = info.get("filename")
+            if name:
+                size_bytes = _bytes_from_b64(info.get("data", ""))
+                audio_files_map[name] = max(size_bytes, audio_files_map.get(name, 0))
+
+            secondary = info.get("secondary")
+            if isinstance(secondary, dict):
+                sec_name = secondary.get("filename")
+                if sec_name:
+                    size_bytes2 = _bytes_from_b64(secondary.get("data", ""))
+                    audio_files_map[sec_name] = max(size_bytes2, audio_files_map.get(sec_name, 0))
+
+        def create_track_entry(info, room_id, is_hall):
+            """Структура трека; 'multi_id' добавляем ТОЛЬКО при наличии доп. ID."""
+            if not info:
+                return None
+            filename = info.get("filename")
+            if not filename:
+                return None
+            base_id = extract_track_id(filename)
+            extras = [i for i in info.get("extra_ids", []) if isinstance(i, int)]
+
+            entry = {
+                "audio": filename,
+                "hall": is_hall,
+                "id": base_id,
+                "name": "",
+                "play_once": bool(info.get("play_once", False)),
+                "reset": bool(info.get("reset", False)),
+                "room_id": room_id,
+                "term": bool(info.get("interruptible", True))
+            }
+
+            # только если есть хотя бы один дополнительный id
+            if extras:
+                seen = set()
+                merged = []
+                for mid in [base_id] + extras:
+                    if mid in seen:
+                        continue
+                    seen.add(mid)
+                    merged.append(mid)
+                entry["multi_id"] = merged
+
+            secondary = info.get("secondary")
+            if isinstance(secondary, dict) and secondary.get("filename"):
+                entry["audio2"] = secondary["filename"]
+            return entry
+
+        # === rooms.json ===
         for h in self.halls:
-            room = {"num":h.number, "anchors":[], "zones":[]}
+            # ширина/высота зала в метрах
+            w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
+            h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
+
+            room = {
+                "num": h.number,
+                "width": w_m,
+                "height": h_m,
+                "anchors": [],
+                "zones": []
+            }
+
+            # anchors
             for a in self.anchors:
-                if a.main_hall_number==h.number or h.number in a.extra_halls:
+                if a.main_hall_number == h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
-                    xm = fix_negative_zero(round(lp.x()/(self.scene.pixel_per_cm_x*100),1))
-                    ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
-                    ae = {"id":a.number, "x":xm, "y":ym, "z":fix_negative_zero(round(a.z/100,1))}
-                    if a.bound: ae["bound"]=True
+                    xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
+                    ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
+                    ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
+                    if a.bound:
+                        ae["bound"] = True
                     room["anchors"].append(ae)
+
+            # zones
             zones = {}
-            default = {"x":0,"y":0,"w":0,"h":0,"angle":0}
+            default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for ch in h.childItems():
-                if isinstance(ch,RectZoneItem):
+                if isinstance(ch, RectZoneItem):
                     n = ch.zone_num
                     if n not in zones:
-                        zones[n] = {"num":n, "enter":default.copy(), "exit":default.copy()}
+                        zones[n] = {"num": n, "enter": default.copy(), "exit": default.copy()}
                     dz = ch.get_export_data()
-                    if ch.zone_type=="Входная зона":
+                    if ch.zone_type == "Входная зона":
                         zones[n]["enter"] = dz
-                    elif ch.zone_type=="Выходная зона":
+                    elif ch.zone_type == "Выходная зона":
                         zones[n]["exit"] = dz
-                    elif ch.zone_type=="Переходная":
-                        zones[n]["enter"]=dz; zones[n]["bound"]=True
+                    elif ch.zone_type == "Переходная":
+                        zones[n]["enter"] = dz
+                        zones[n]["bound"] = True
+
             for z in zones.values():
                 room["zones"].append(z)
+
             config["rooms"].append(room)
 
-        result = '{\n"rooms": [\n'
-        room_strs = []
+            # аудио для tracks.json (sizes в байтах)
+            if h.audio_settings:
+                collect_audio_files(h.audio_settings)
+                entry = create_track_entry(h.audio_settings, h.number, True)
+                if entry:
+                    track_entries.append(entry)
+            for _, audio_info in sorted(h.zone_audio_tracks.items()):
+                if not audio_info:
+                    continue
+                collect_audio_files(audio_info)
+                entry = create_track_entry(audio_info, h.number, False)
+                if entry:
+                    track_entries.append(entry)
+
+        # Сохраняем rooms.json (как текст для читабельности)
+        rooms_strs = []
         for room in config["rooms"]:
-            lines = ['{', f'"num": {room["num"]},', '"anchors": [']
+            lines = [
+                "{",
+                f'"num": {room["num"]},',
+                f'"width": {room["width"]},',
+                f'"height": {room["height"]},',
+                '"anchors": ['
+            ]
             alines = []
             for a in room["anchors"]:
                 s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
-                if a.get("bound"): s += ', "bound": true'
-                s += ' }'; alines.append(s)
-            lines.append(",\n".join(alines)); lines.append('],'); lines.append('"zones": [')
+                if a.get("bound"):
+                    s += ', "bound": true'
+                s += " }"
+                alines.append(s)
+            lines.append(",\n".join(alines))
+            lines.append("],")
+            lines.append('"zones": [')
             zlines = []
             for z in room["zones"]:
-                zl = '{'
+                zl = "{"
                 zl += f'\n"num": {z["num"]},'
-                zl += (f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
-                       f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
-                       f'"angle": {z["enter"]["angle"]} }},')
-                zl += (f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
-                       f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
-                       f'"angle": {z["exit"]["angle"]} }}')
-                if z.get("bound"): zl += ',\n"bound": true'
-                zl += '\n}'; zlines.append(zl)
-            lines.append(",\n".join(zlines)); lines.append(']'); lines.append('}')
-            room_strs.append("\n".join(lines))
-        result += ",\n".join(room_strs) + '\n]\n}'
+                zl += (
+                    f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
+                    f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
+                    f'"angle": {z["enter"]["angle"]} }},'
+                )
+                zl += (
+                    f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
+                    f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
+                    f'"angle": {z["exit"]["angle"]} }}'
+                )
+                if z.get("bound"):
+                    zl += ',\n"bound": true'
+                zl += "\n}"
+                zlines.append(zl)
+            lines.append(",\n".join(zlines))
+            lines.append("]")
+            lines.append("}")
+            rooms_strs.append("\n".join(lines))
+
+        rooms_json_text = '{\n"rooms": [\n' + ",\n".join(rooms_strs) + "\n]\n}"
+
+        # === tracks.json (files.size в байтах) ===
+        track_entries.sort(key=lambda item: (item["room_id"], not item["hall"], item["id"]))
+        files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
+        tracks_data = {
+            "files": files_list,
+            "langs": [],
+            "tracks": track_entries,
+            "version": datetime.now().strftime("%y%m%d")
+        }
+        tracks_path = os.path.join(os.path.dirname(fp), "tracks.json")
+
         try:
-            with open(fp,"w",encoding="utf-8") as f: f.write(result)
-            QMessageBox.information(self,"Экспорт","Экспорт завершён.")
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(rooms_json_text)
+            with open(tracks_path, "w", encoding="utf-8") as f:
+                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
+            QMessageBox.information(self, "Экспорт", "Экспорт завершён. Обновлены rooms.json и tracks.json.")
         except Exception as e:
-            QMessageBox.critical(self,"Ошибка",f"Не удалось экспортировать:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def closeEvent(self, event):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
@@ -1051,7 +2118,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.view.setScene(None); event.accept()
 
 if __name__ == "__main__":
-    app = QApplication(sys.argv)
+    app = QApplication(os.getenv("QT_FORCE_STDERR_LOGGING") and sys.argv or sys.argv)
     window = PlanEditorMainWindow()
     window.show()
     sys.exit(app.exec())
