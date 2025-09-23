@@ -6,13 +6,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox
+    QGroupBox, QStyle
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor, QKeySequence
+    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
+from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
 from mutagen.mp3 import MP3
 
@@ -1341,35 +1341,9 @@ class PlanEditorMainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
-        toolbar = QToolBar("Инструменты", self); self.addToolBar(toolbar)
-        act_open = QAction("Открыть изображение", self)
-        act_cal = QAction("Выполнить калибровку", self)
-        toolbar.addAction(act_open); toolbar.addAction(act_cal); toolbar.addSeparator()
-        act_save = QAction("Сохранить проект", self); act_load = QAction("Загрузить проект", self)
-        toolbar.addAction(act_save); toolbar.addAction(act_load)
-        self.undo_action = QAction("Отменить", self)
-        self.undo_action.setShortcut(QKeySequence.Undo)
-        self.undo_action.setEnabled(False)
-        toolbar.addAction(self.undo_action); toolbar.addSeparator()
-        act_add_hall = QAction("Добавить зал", self)
-        act_add_anchor = QAction("Добавить якорь", self)
-        act_add_zone = QAction("Добавить зону", self)
-        toolbar.addAction(act_add_hall); toolbar.addAction(act_add_anchor); toolbar.addAction(act_add_zone)
-        self.act_lock = QAction("Закрепить объекты", self); toolbar.addAction(self.act_lock); toolbar.addSeparator()
-        act_export = QAction("Экспорт конфигурации", self); toolbar.addAction(act_export)
-        act_pdf = QAction("Сохранить в PDF", self); toolbar.addAction(act_pdf)
-
-        act_open.triggered.connect(self.open_image)
-        act_cal.triggered.connect(self.perform_calibration)
-        act_save.triggered.connect(self.save_project)
-        act_load.triggered.connect(self.load_project)
-        act_export.triggered.connect(self.export_config)
-        act_pdf.triggered.connect(self.save_to_pdf)
-        act_add_hall.triggered.connect(lambda: self.set_mode("hall"))
-        act_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
-        act_add_zone.triggered.connect(lambda: self.set_mode("zone"))
-        self.act_lock.triggered.connect(self.lock_objects)
-        self.undo_action.triggered.connect(self.undo_last_action)
+        self._create_actions()
+        self._create_menus()
+        self._create_toolbars()
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1390,6 +1364,147 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
+
+    def _create_actions(self):
+        style = self.style()
+
+        def themed(name: str, fallback: QStyle.StandardPixmap | None):
+            icon = QIcon.fromTheme(name)
+            if icon.isNull() and fallback is not None:
+                icon = style.standardIcon(fallback)
+            return icon
+
+        self.action_open = QAction(
+            themed("document-open", QStyle.SP_DialogOpenButton),
+            "Открыть изображение",
+            self,
+        )
+        self.action_open.triggered.connect(self.open_image)
+
+        self.action_save = QAction(
+            themed("document-save", QStyle.SP_DialogSaveButton),
+            "Сохранить проект",
+            self,
+        )
+        self.action_save.triggered.connect(self.save_project)
+
+        self.action_load = QAction(
+            themed("document-open-recent", QStyle.SP_DialogOpenButton),
+            "Загрузить проект",
+            self,
+        )
+        self.action_load.triggered.connect(self.load_project)
+
+        self.action_export = QAction(
+            themed("document-export", QStyle.SP_DialogSaveButton),
+            "Экспорт конфигурации",
+            self,
+        )
+        self.action_export.triggered.connect(self.export_config)
+
+        self.action_pdf = QAction(
+            themed("application-pdf", QStyle.SP_FileDialogDetailedView),
+            "Сохранить в PDF",
+            self,
+        )
+        self.action_pdf.triggered.connect(self.save_to_pdf)
+
+        self.action_calibrate = QAction(
+            themed("tools-wizard", QStyle.SP_ComputerIcon),
+            "Выполнить калибровку",
+            self,
+        )
+        self.action_calibrate.triggered.connect(self.perform_calibration)
+
+        self.action_add_hall = QAction(
+            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            "Добавить зал",
+            self,
+        )
+        self.action_add_hall.triggered.connect(lambda: self.set_mode("hall"))
+
+        self.action_add_anchor = QAction(
+            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            "Добавить якорь",
+            self,
+        )
+        self.action_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
+
+        self.action_add_zone = QAction(
+            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            "Добавить зону",
+            self,
+        )
+        self.action_add_zone.triggered.connect(lambda: self.set_mode("zone"))
+
+        self.act_lock = QAction(
+            themed("object-locked", QStyle.SP_DialogCloseButton),
+            "Закрепить объекты",
+            self,
+        )
+        self.act_lock.triggered.connect(self.lock_objects)
+
+        self.undo_action = QAction(
+            themed("edit-undo", QStyle.SP_ArrowBack),
+            "Отменить",
+            self,
+        )
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo_last_action)
+
+    def _create_menus(self):
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("Файл")
+        file_menu.addAction(self.action_open)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save)
+        file_menu.addAction(self.action_load)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_pdf)
+
+        edit_menu = menu_bar.addMenu("Правка")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_lock)
+
+        tools_menu = menu_bar.addMenu("Инструменты")
+        tools_menu.addAction(self.action_calibrate)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_add_hall)
+        tools_menu.addAction(self.action_add_anchor)
+        tools_menu.addAction(self.action_add_zone)
+
+    def _create_toolbars(self):
+        icon_size = QSize(24, 24)
+
+        file_toolbar = QToolBar("Файл", self)
+        file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        file_toolbar.setIconSize(icon_size)
+        file_toolbar.addAction(self.action_open)
+        file_toolbar.addSeparator()
+        file_toolbar.addAction(self.action_save)
+        file_toolbar.addAction(self.action_load)
+        file_toolbar.addSeparator()
+        file_toolbar.addAction(self.action_export)
+        file_toolbar.addAction(self.action_pdf)
+        self.addToolBar(file_toolbar)
+
+        tools_toolbar = QToolBar("Инструменты", self)
+        tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tools_toolbar.setIconSize(icon_size)
+        tools_toolbar.addAction(self.action_calibrate)
+        tools_toolbar.addSeparator()
+        tools_toolbar.addAction(self.action_add_hall)
+        tools_toolbar.addAction(self.action_add_anchor)
+        tools_toolbar.addAction(self.action_add_zone)
+        tools_toolbar.addSeparator()
+        tools_toolbar.addAction(self.act_lock)
+        tools_toolbar.addSeparator()
+        tools_toolbar.addAction(self.undo_action)
+        self.addToolBar(tools_toolbar)
 
     def _reset_background_cache(self):
         self._undo_bg_cache_key = None
