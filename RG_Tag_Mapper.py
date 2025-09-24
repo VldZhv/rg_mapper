@@ -1366,86 +1366,88 @@ class PlanEditorMainWindow(QMainWindow):
         self.update_undo_action()
 
     def _create_actions(self):
-        style = self.style()
+        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
 
-        def themed(name: str, fallback: QStyle.StandardPixmap | None):
-            icon = QIcon.fromTheme(name)
-            if icon.isNull() and fallback is not None:
-                icon = style.standardIcon(fallback)
-            return icon
+        def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
+            path = os.path.join(icons_dir, filename)
+            if os.path.exists(path):
+                return QIcon(path)
+            if fallback is not None:
+                return self.style().standardIcon(fallback)
+            return QIcon()
 
         self.action_open = QAction(
-            themed("document-open", QStyle.SP_DialogOpenButton),
+            load_icon("open.png", QStyle.SP_DialogOpenButton),
             "Открыть изображение",
             self,
         )
         self.action_open.triggered.connect(self.open_image)
 
         self.action_save = QAction(
-            themed("document-save", QStyle.SP_DialogSaveButton),
+            load_icon("save.png", QStyle.SP_DialogSaveButton),
             "Сохранить проект",
             self,
         )
         self.action_save.triggered.connect(self.save_project)
 
         self.action_load = QAction(
-            themed("document-open-recent", QStyle.SP_DialogOpenButton),
+            load_icon("load.png", QStyle.SP_DialogOpenButton),
             "Загрузить проект",
             self,
         )
         self.action_load.triggered.connect(self.load_project)
 
         self.action_export = QAction(
-            themed("document-export", QStyle.SP_DialogSaveButton),
+            load_icon("export.png", QStyle.SP_DialogSaveButton),
             "Экспорт конфигурации",
             self,
         )
         self.action_export.triggered.connect(self.export_config)
 
         self.action_pdf = QAction(
-            themed("application-pdf", QStyle.SP_FileDialogDetailedView),
+            load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
             "Сохранить в PDF",
             self,
         )
         self.action_pdf.triggered.connect(self.save_to_pdf)
 
         self.action_calibrate = QAction(
-            themed("tools-wizard", QStyle.SP_ComputerIcon),
+            load_icon("calibration.png", QStyle.SP_ComputerIcon),
             "Выполнить калибровку",
             self,
         )
         self.action_calibrate.triggered.connect(self.perform_calibration)
 
         self.action_add_hall = QAction(
-            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            load_icon("hall.png", QStyle.SP_FileDialogNewFolder),
             "Добавить зал",
             self,
         )
         self.action_add_hall.triggered.connect(lambda: self.set_mode("hall"))
 
         self.action_add_anchor = QAction(
-            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            load_icon("anchor.png", QStyle.SP_FileDialogNewFolder),
             "Добавить якорь",
             self,
         )
         self.action_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
 
         self.action_add_zone = QAction(
-            themed("list-add", QStyle.SP_FileDialogNewFolder),
+            load_icon("zone.png", QStyle.SP_FileDialogNewFolder),
             "Добавить зону",
             self,
         )
         self.action_add_zone.triggered.connect(lambda: self.set_mode("zone"))
 
         self.act_lock = QAction(
-            themed("object-locked", QStyle.SP_DialogCloseButton),
+            load_icon("lock.png", QStyle.SP_DialogCloseButton),
             "Закрепить объекты",
             self,
         )
         self.act_lock.triggered.connect(self.lock_objects)
 
         self.undo_action = QAction(
-            themed("edit-undo", QStyle.SP_ArrowBack),
+            load_icon("undo.png", QStyle.SP_ArrowBack),
             "Отменить",
             self,
         )
@@ -1478,7 +1480,7 @@ class PlanEditorMainWindow(QMainWindow):
         tools_menu.addAction(self.action_add_zone)
 
     def _create_toolbars(self):
-        icon_size = QSize(24, 24)
+        icon_size = QSize(48, 48)
 
         file_toolbar = QToolBar("Файл", self)
         file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
