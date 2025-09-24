@@ -1404,12 +1404,25 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_save.triggered.connect(self.save_project)
 
+        self.action_save_as = QAction(
+            "Сохранить проект как…",
+            self,
+        )
+        self.action_save_as.triggered.connect(self.save_project_as)
+
         self.action_load = QAction(
             load_icon("load.png", QStyle.SP_DialogOpenButton),
             "Загрузить проект",
             self,
         )
         self.action_load.triggered.connect(self.load_project)
+
+        self.action_import = QAction(
+            load_icon("import.png", QStyle.SP_DialogOpenButton),
+            "Импорт конфигурации",
+            self,
+        )
+        self.action_import.triggered.connect(self.show_import_menu)
 
         self.action_export = QAction(
             load_icon("export.png", QStyle.SP_DialogSaveButton),
@@ -1482,8 +1495,10 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addAction(self.action_open)
         file_menu.addSeparator()
         file_menu.addAction(self.action_save)
+        file_menu.addAction(self.action_save_as)
         file_menu.addAction(self.action_load)
         file_menu.addSeparator()
+        file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
         file_menu.addAction(self.action_pdf)
 
@@ -1515,6 +1530,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_toolbar.addAction(self.action_save)
         file_toolbar.addAction(self.action_load)
         self._add_toolbar_group_separator(file_toolbar)
+        file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
@@ -2030,13 +2046,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.set_mode("calibrate")
         self.push_undo_state(prev_state)
 
-    def save_project(self):
-        if not self.current_project_file:
-            fp,_ = QFileDialog.getSaveFileName(self,"Сохранить проект","","*.proj")
-            if not fp: return
-            self.current_project_file = fp
-        else:
-            fp = self.current_project_file
+    def _collect_project_data(self):
         buf_data = ""
         if self.scene.pixmap:
             buf = QBuffer(); buf.open(QBuffer.WriteOnly)
@@ -2084,12 +2094,302 @@ class PlanEditorMainWindow(QMainWindow):
             }
             if a.bound: ad["bound"] = True
             data["anchors"].append(ad)
+        return data
+
+    def _save_project_file(self, fp, data):
         try:
-            with open(fp,"w",encoding="utf-8") as f:
-                json.dump(data,f,ensure_ascii=False,indent=4)
-            QMessageBox.information(self,"Сохранено","Проект сохранён.")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            QMessageBox.critical(self,"Ошибка",f"Не удалось сохранить:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+            return False
+        QMessageBox.information(self, "Сохранено", "Проект сохранён.")
+        return True
+
+    def save_project(self):
+        target = self.current_project_file
+        if not target:
+            target, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", "", "*.proj")
+            if not target:
+                return
+        data = self._collect_project_data()
+        if self._save_project_file(target, data):
+            self.current_project_file = target
+
+    def save_project_as(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Сохранить проект как", "", "*.proj")
+        if not fp:
+            return
+        data = self._collect_project_data()
+        if self._save_project_file(fp, data):
+            self.current_project_file = fp
+
+    def show_import_menu(self):
+        menu = QMenu(self)
+        rooms_action = menu.addAction("Импортировать объекты")
+        tracks_action = menu.addAction("Импортировать аудиофайлы")
+        global_pos = QCursor.pos()
+        if not self.rect().contains(self.mapFromGlobal(global_pos)):
+            global_pos = self.mapToGlobal(self.rect().center())
+        chosen = menu.exec(global_pos)
+        if chosen == rooms_action:
+            self.import_rooms_config()
+        elif chosen == tracks_action:
+            self.import_tracks_config()
+
+    def import_rooms_config(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "Импорт объектов", "", "JSON файлы (*.json)")
+        if not fp:
+            return
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{e}")
+            return
+        rooms = data.get("rooms") if isinstance(data, dict) else None
+        if not isinstance(rooms, list):
+            QMessageBox.warning(self, "Ошибка", "Выбранный файл не соответствует формату rooms.json.")
+            return
+
+        ppcm = self.scene.pixel_per_cm_x or 0.0
+        if ppcm <= 0:
+            QMessageBox.warning(self, "Ошибка", "Перед импортом объектов выполните калибровку масштаба.")
+            return
+
+        prev_state = self.capture_state()
+        hall_map = {h.number: h for h in self.halls}
+        zone_audio_backup = {h.number: copy.deepcopy(h.zone_audio_tracks) for h in self.halls if h.zone_audio_tracks}
+        existing_zone_count = sum(1 for h in self.halls for ch in h.childItems() if isinstance(ch, RectZoneItem))
+        existing_anchor_count = len(self.anchors)
+        changed = bool(existing_zone_count or existing_anchor_count)
+
+        for hall in self.halls:
+            for child in list(hall.childItems()):
+                if isinstance(child, RectZoneItem):
+                    child.scene().removeItem(child)
+            hall.zone_audio_tracks.clear()
+        for anchor in list(self.anchors):
+            self.scene.removeItem(anchor)
+        self.anchors.clear()
+
+        missing_halls: list[int] = []
+        for room in rooms:
+            if not isinstance(room, dict):
+                continue
+            try:
+                hall_number = int(room.get("num"))
+            except (TypeError, ValueError):
+                continue
+            hall = hall_map.get(hall_number)
+            if hall is None:
+                missing_halls.append(hall_number)
+                continue
+
+            width = room.get("width")
+            height = room.get("height")
+            try:
+                width_m = float(width)
+                height_m = float(height)
+            except (TypeError, ValueError):
+                width_m = height_m = None
+            if width_m and width_m > 0 and height_m and height_m > 0:
+                w_px = width_m * ppcm * 100
+                h_px = height_m * ppcm * 100
+                hall.prepareGeometryChange()
+                hall.setRect(0, 0, w_px, h_px)
+                hall.setZValue(-w_px * h_px)
+                changed = True
+
+            created_zone_numbers: set[int] = set()
+
+            def add_zone(section: dict | None, zone_type: str) -> bool:
+                if not isinstance(section, dict):
+                    return False
+                try:
+                    w_m = float(section.get("w", 0))
+                    h_m = float(section.get("h", 0))
+                    x_m = float(section.get("x", 0))
+                    y_m = float(section.get("y", 0))
+                    angle = float(section.get("angle", 0))
+                except (TypeError, ValueError):
+                    return False
+                if w_m <= 0 or h_m <= 0:
+                    return False
+                w_px = w_m * ppcm * 100
+                h_px = h_m * ppcm * 100
+                px = x_m * ppcm * 100
+                py = hall.rect().height() - y_m * ppcm * 100
+                RectZoneItem(QPointF(px, py), w_px, h_px, zone_number, zone_type, angle, hall)
+                return True
+
+            zones = room.get("zones") if isinstance(room.get("zones"), list) else []
+            for zone in zones:
+                if not isinstance(zone, dict):
+                    continue
+                try:
+                    zone_number = int(zone.get("num"))
+                except (TypeError, ValueError):
+                    continue
+                bound = bool(zone.get("bound", False))
+                if bound:
+                    if add_zone(zone.get("enter"), "Переходная"):
+                        created_zone_numbers.add(zone_number)
+                        changed = True
+                else:
+                    entered = add_zone(zone.get("enter"), "Входная зона")
+                    exited = add_zone(zone.get("exit"), "Выходная зона")
+                    if entered or exited:
+                        created_zone_numbers.add(zone_number)
+                        changed = True
+
+            anchors = room.get("anchors") if isinstance(room.get("anchors"), list) else []
+            for anchor_data in anchors:
+                if not isinstance(anchor_data, dict):
+                    continue
+                try:
+                    anchor_id = int(anchor_data.get("id"))
+                    x_m = float(anchor_data.get("x", 0))
+                    y_m = float(anchor_data.get("y", 0))
+                    z_m = float(anchor_data.get("z", 0))
+                except (TypeError, ValueError):
+                    continue
+                px = x_m * ppcm * 100
+                py = hall.rect().height() - y_m * ppcm * 100
+                scene_pos = hall.mapToScene(QPointF(px, py))
+                anchor_item = AnchorItem(scene_pos.x(), scene_pos.y(), anchor_id, main_hall_number=hall.number, scene=self.scene)
+                anchor_item.z = int(round(z_m * 100))
+                if anchor_data.get("bound"):
+                    anchor_item.bound = True
+                self.scene.addItem(anchor_item)
+                self.anchors.append(anchor_item)
+                changed = True
+
+            saved_audio = zone_audio_backup.get(hall_number, {})
+            if saved_audio:
+                for zone_id in created_zone_numbers:
+                    audio_info = saved_audio.get(zone_id)
+                    if audio_info:
+                        hall.zone_audio_tracks[zone_id] = copy.deepcopy(audio_info)
+
+        if missing_halls:
+            missing_str = ", ".join(str(n) for n in sorted(set(missing_halls)))
+            QMessageBox.warning(self, "Предупреждение", f"В проекте отсутствуют залы: {missing_str}. Объекты этих залов не были импортированы.")
+
+        self.populate_tree()
+        if changed or rooms:
+            self.push_undo_state(prev_state)
+        self.statusBar().showMessage("Импорт объектов завершён.", 5000)
+        QMessageBox.information(self, "Импорт", "Импорт объектов завершён.")
+
+    def _build_audio_info_from_track(self, track: dict):
+        filename = track.get("audio")
+        if not filename:
+            return None
+        try:
+            base_id = int(track.get("id"))
+        except (TypeError, ValueError):
+            base_id = None
+        extras = []
+        for value in track.get("multi_id", []) or []:
+            try:
+                extra_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if base_id is not None and extra_id == base_id:
+                continue
+            extras.append(extra_id)
+        info = {
+            "filename": filename,
+            "data": "",
+            "duration_ms": int(track.get("duration_ms", 0) or 0),
+            "extra_ids": extras,
+            "interruptible": bool(track.get("term", True)),
+            "reset": bool(track.get("reset", False)),
+            "play_once": bool(track.get("play_once", False))
+        }
+        if track.get("audio2"):
+            info["secondary"] = {
+                "filename": track["audio2"],
+                "data": "",
+                "duration_ms": 0
+            }
+        return info
+
+    def import_tracks_config(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "Импорт аудиофайлов", "", "JSON файлы (*.json)")
+        if not fp:
+            return
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{e}")
+            return
+        tracks = data.get("tracks") if isinstance(data, dict) else None
+        if not isinstance(tracks, list):
+            QMessageBox.warning(self, "Ошибка", "Выбранный файл не соответствует формату tracks.json.")
+            return
+
+        prev_state = self.capture_state()
+        hall_map = {h.number: h for h in self.halls}
+        had_audio = any(h.audio_settings or h.zone_audio_tracks for h in self.halls)
+        for hall in self.halls:
+            hall.audio_settings = None
+            hall.zone_audio_tracks.clear()
+
+        changed = had_audio
+        unmatched_halls: set[int] = set()
+        unmatched_zones: set[int] = set()
+
+        for entry in tracks:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                track_id = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            audio_info = self._build_audio_info_from_track(entry)
+            if not audio_info:
+                continue
+            target_hall = None
+            room_id = entry.get("room_id")
+            if isinstance(room_id, (int, float)):
+                target_hall = hall_map.get(int(room_id))
+            if target_hall is None:
+                target_hall = hall_map.get(track_id)
+            if entry.get("hall"):
+                if target_hall is None:
+                    unmatched_halls.add(track_id)
+                    continue
+                target_hall.audio_settings = audio_info
+                changed = True
+                continue
+            if target_hall is None:
+                possible = [h for h in self.halls if any(isinstance(ch, RectZoneItem) and ch.zone_num == track_id for ch in h.childItems())]
+                if len(possible) == 1:
+                    target_hall = possible[0]
+                else:
+                    unmatched_zones.add(track_id)
+                    continue
+            target_hall.zone_audio_tracks[track_id] = audio_info
+            changed = True
+
+        warnings = []
+        if unmatched_halls:
+            hall_list = ", ".join(str(x) for x in sorted(unmatched_halls))
+            warnings.append(f"Залы: {hall_list}")
+        if unmatched_zones:
+            zone_list = ", ".join(str(x) for x in sorted(unmatched_zones))
+            warnings.append(f"Зоны: {zone_list}")
+        if warnings:
+            QMessageBox.warning(self, "Предупреждение", "Не найдены объекты для следующих идентификаторов:\n" + "\n".join(warnings))
+
+        self.populate_tree()
+        if changed or tracks:
+            self.push_undo_state(prev_state)
+        self.statusBar().showMessage("Импорт аудиофайлов завершён.", 5000)
+        QMessageBox.information(self, "Импорт", "Импорт аудиофайлов завершён.")
 
     def load_project(self):
         fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
