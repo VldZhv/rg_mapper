@@ -1486,10 +1486,10 @@ class PlanEditorMainWindow(QMainWindow):
         file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         file_toolbar.setIconSize(icon_size)
         file_toolbar.addAction(self.action_open)
-        file_toolbar.addSeparator()
+        self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_save)
         file_toolbar.addAction(self.action_load)
-        file_toolbar.addSeparator()
+        self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_export)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
@@ -1498,15 +1498,29 @@ class PlanEditorMainWindow(QMainWindow):
         tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         tools_toolbar.setIconSize(icon_size)
         tools_toolbar.addAction(self.action_calibrate)
-        tools_toolbar.addSeparator()
+        self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.action_add_hall)
         tools_toolbar.addAction(self.action_add_anchor)
         tools_toolbar.addAction(self.action_add_zone)
-        tools_toolbar.addSeparator()
+        self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.act_lock)
-        tools_toolbar.addSeparator()
+        self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.undo_action)
         self.addToolBar(tools_toolbar)
+
+    def _toolbar_group_spacing(self, toolbar: QToolBar) -> int:
+        base_spacing = toolbar.style().pixelMetric(QStyle.PM_ToolBarItemSpacing, None, toolbar)
+        if base_spacing <= 0:
+            base_spacing = max(8, toolbar.iconSize().width() // 4)
+        return base_spacing
+
+    def _add_toolbar_group_separator(self, toolbar: QToolBar):
+        toolbar.addSeparator()
+        spacer = QWidget(toolbar)
+        spacer.setFixedWidth(self._toolbar_group_spacing(toolbar))
+        spacer.setAttribute(Qt.WA_TransparentForMouseEvents)
+        spacer.setFocusPolicy(Qt.NoFocus)
+        toolbar.addWidget(spacer)
 
     def _reset_background_cache(self):
         self._undo_bg_cache_key = None
