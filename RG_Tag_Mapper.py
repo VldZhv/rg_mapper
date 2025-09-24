@@ -534,9 +534,13 @@ class HallItem(QGraphicsRectItem):
                 new.setY(round(new.y()/step)*step)
             delta = new - self.pos()
             if not delta.isNull():
-                for child in self.childItems():
-                    if isinstance(child, RectZoneItem):
-                        child.moveBy(-delta.x(), -delta.y())
+                scene = self.scene()
+                if scene:
+                    mw = getattr(scene, "mainwindow", None)
+                    if mw:
+                        for anchor in mw.anchors:
+                            if anchor.main_hall_number == self.number or self.number in anchor.extra_halls:
+                                anchor.moveBy(delta.x(), delta.y())
             return new
         return super().itemChange(change, value)
 
