@@ -1325,6 +1325,9 @@ class PlanEditorMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("RG Tags Mapper"); self.resize(1200,800)
 
+        self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        self._apply_app_icon()
+
         self.scene = PlanGraphicsScene(); self.scene.mainwindow=self
         self.scene.selectionChanged.connect(self.on_scene_selection_changed)
         self.view = MyGraphicsView(self.scene)
@@ -1365,11 +1368,19 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
 
-    def _create_actions(self):
-        icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+    def _apply_app_icon(self):
+        icon_path = os.path.join(self._icons_dir, "app.png")
+        if not os.path.exists(icon_path):
+            return
+        icon = QIcon(icon_path)
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
 
+    def _create_actions(self):
         def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
-            path = os.path.join(icons_dir, filename)
+            path = os.path.join(self._icons_dir, filename)
             if os.path.exists(path):
                 return QIcon(path)
             if fallback is not None:
@@ -2250,6 +2261,10 @@ class PlanEditorMainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(os.getenv("QT_FORCE_STDERR_LOGGING") and sys.argv or sys.argv)
+    icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+    app_icon_path = os.path.join(icons_dir, "app.png")
+    if os.path.exists(app_icon_path):
+        app.setWindowIcon(QIcon(app_icon_path))
     window = PlanEditorMainWindow()
     window.show()
     sys.exit(app.exec())
