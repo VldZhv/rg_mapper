@@ -1846,7 +1846,7 @@ class PlanEditorMainWindow(QMainWindow):
         if not self.scene.pixmap:
             QMessageBox.warning(self, "Ошибка", "Сначала загрузите изображение!"); return
         self.set_mode("calibrate")
-        self.statusBar().showMessage("Нажмите на 2 точки для калибровки")
+        self.statusBar().showMessage("Укажите 2 точки на плане для обозначения отрезка известной длины")
     def resnap_objects(self):
         step = self.scene.pixel_per_cm_x * self.scene.grid_step_cm
         for h in self.halls:
