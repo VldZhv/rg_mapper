@@ -828,14 +828,20 @@ class AnchorItem(QGraphicsEllipseItem):
 # ZoneItem
 # ---------------------------------------------------------------------------
 class RectZoneItem(QGraphicsRectItem):
+    _ZONE_RGB = {
+        "Входная зона": (0, 128, 0),
+        "Входная": (0, 128, 0),
+        "Выходная зона": (128, 0, 128),
+        "Выходная": (128, 0, 128),
+        "Переходная": (0, 102, 204),
+        "Переходная зона": (0, 102, 204),
+    }
+
     def __init__(self, bl, w, h, zone_num=0, zone_type="Входная зона", angle=0, parent_hall=None):
         super().__init__(0, -h, w, h, parent_hall)
         self.zone_num, self.zone_type, self.zone_angle = zone_num, zone_type, angle
         self.setTransformOriginPoint(0,0); self.setRotation(-angle); self.setPos(bl)
-        if zone_type in ("Входная зона","Переходная"):
-            self.setPen(QPen(QColor(0,128,0),2)); self.setBrush(QBrush(QColor(0,128,0,50)))
-        else:
-            self.setPen(QPen(QColor(128,0,128),2)); self.setBrush(QBrush(QColor(128,0,128,50)))
+        self._apply_zone_palette()
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
         self.update_zvalue()
@@ -847,6 +853,16 @@ class RectZoneItem(QGraphicsRectItem):
         hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, 'number') else 0
         zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
         self.setZValue(5000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
+
+    def _apply_zone_palette(self):
+        rgb = self._ZONE_RGB.get(self.zone_type)
+        if not rgb:
+            rgb = self._ZONE_RGB["Входная зона"]
+        base_color = QColor(*rgb)
+        self.setPen(QPen(base_color, 2))
+        fill_color = QColor(base_color)
+        fill_color.setAlpha(50)
+        self.setBrush(QBrush(fill_color))
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -911,12 +927,7 @@ class RectZoneItem(QGraphicsRectItem):
                 self.zone_type = values['zone_type']
                 self.zone_angle = values['angle']
                 self.update_zvalue()
-                if self.zone_type in ("Входная зона", "Переходная"):
-                    self.setPen(QPen(QColor(0,128,0),2))
-                    self.setBrush(QBrush(QColor(0,128,0,50)))
-                else:
-                    self.setPen(QPen(QColor(128,0,128),2))
-                    self.setBrush(QBrush(QColor(128,0,128,50)))
+                self._apply_zone_palette()
                 ppcm = scene.pixel_per_cm_x
                 w_px = values['w'] * ppcm * 100
                 h_px = values['h'] * ppcm * 100
