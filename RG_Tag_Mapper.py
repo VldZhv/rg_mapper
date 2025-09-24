@@ -47,12 +47,17 @@ def load_audio_file_info(path: str):
     except Exception as exc:
         raise ValueError(str(exc)) from exc
     duration_ms = int(round(audio.info.length * 1000)) if audio.info.length else 0
+    try:
+        size_bytes = os.path.getsize(path)
+    except OSError:
+        size_bytes = 0
     with open(path, 'rb') as fh:
         encoded = base64.b64encode(fh.read()).decode('ascii')
     return {
         'filename': os.path.basename(path),
         'data': encoded,
-        'duration_ms': duration_ms
+        'duration_ms': duration_ms,
+        'size': size_bytes
     }
 
 
@@ -148,7 +153,8 @@ class AudioTrackWidget(QWidget):
         self.main_file_info = {
             'filename': data.get('filename'),
             'data': data.get('data'),
-            'duration_ms': data.get('duration_ms', 0)
+            'duration_ms': data.get('duration_ms', 0),
+            'size': data.get('size', 0)
         }
         self.secondary_file_info = None
         if data.get('secondary'):
@@ -156,7 +162,8 @@ class AudioTrackWidget(QWidget):
             self.secondary_file_info = {
                 'filename': sec.get('filename'),
                 'data': sec.get('data'),
-                'duration_ms': sec.get('duration_ms', 0)
+                'duration_ms': sec.get('duration_ms', 0),
+                'size': sec.get('size', 0)
             }
         self.extra_ids_edit.setText(', '.join(str(x) for x in data.get('extra_ids', [])))
         self.interruptible_box.setChecked(data.get('interruptible', True))
@@ -171,6 +178,7 @@ class AudioTrackWidget(QWidget):
             'filename': self.main_file_info['filename'],
             'data': self.main_file_info['data'],
             'duration_ms': self.main_file_info.get('duration_ms', 0),
+            'size': self.main_file_info.get('size', 0),
             'extra_ids': parse_additional_ids(self.extra_ids_edit.text()),
             'interruptible': self.interruptible_box.isChecked(),
             'reset': self.reset_box.isChecked(),
@@ -180,7 +188,8 @@ class AudioTrackWidget(QWidget):
             result['secondary'] = {
                 'filename': self.secondary_file_info['filename'],
                 'data': self.secondary_file_info['data'],
-                'duration_ms': self.secondary_file_info.get('duration_ms', 0)
+                'duration_ms': self.secondary_file_info.get('duration_ms', 0),
+                'size': self.secondary_file_info.get('size', 0)
             }
         return result
 
@@ -1433,7 +1442,7 @@ class PlanEditorMainWindow(QMainWindow):
             "Экспорт конфигурации",
             self,
         )
-        self.action_export.triggered.connect(self.export_config)
+        self.action_export.triggered.connect(self.show_export_menu)
 
         self.action_pdf = QAction(
             load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
@@ -2141,6 +2150,19 @@ class PlanEditorMainWindow(QMainWindow):
         elif chosen == tracks_action:
             self.import_tracks_config()
 
+    def show_export_menu(self):
+        menu = QMenu(self)
+        rooms_action = menu.addAction("Экспортировать объекты")
+        tracks_action = menu.addAction("Экспортировать аудиофайлы")
+        global_pos = QCursor.pos()
+        if not self.rect().contains(self.mapFromGlobal(global_pos)):
+            global_pos = self.mapToGlobal(self.rect().center())
+        chosen = menu.exec(global_pos)
+        if chosen == rooms_action:
+            self.export_rooms_config()
+        elif chosen == tracks_action:
+            self.export_tracks_config()
+
     def import_rooms_config(self):
         fp, _ = QFileDialog.getOpenFileName(self, "Импорт объектов", "", "JSON файлы (*.json)")
         if not fp:
@@ -2286,7 +2308,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Импорт объектов завершён.", 5000)
         QMessageBox.information(self, "Импорт", "Импорт объектов завершён.")
 
-    def _build_audio_info_from_track(self, track: dict):
+    def _build_audio_info_from_track(self, track: dict, file_sizes: dict[str, int] | None = None):
         filename = track.get("audio")
         if not filename:
             return None
@@ -2294,6 +2316,17 @@ class PlanEditorMainWindow(QMainWindow):
             base_id = int(track.get("id"))
         except (TypeError, ValueError):
             base_id = None
+        size_bytes = 0
+        if isinstance(file_sizes, dict) and filename in file_sizes:
+            try:
+                size_bytes = int(file_sizes.get(filename, 0) or 0)
+            except (TypeError, ValueError):
+                size_bytes = 0
+        if size_bytes <= 0:
+            try:
+                size_bytes = int(track.get("size") or 0)
+            except (TypeError, ValueError):
+                size_bytes = 0
         extras = []
         for value in track.get("multi_id", []) or []:
             try:
@@ -2307,16 +2340,24 @@ class PlanEditorMainWindow(QMainWindow):
             "filename": filename,
             "data": "",
             "duration_ms": int(track.get("duration_ms", 0) or 0),
+            "size": size_bytes,
             "extra_ids": extras,
             "interruptible": bool(track.get("term", True)),
             "reset": bool(track.get("reset", False)),
             "play_once": bool(track.get("play_once", False))
         }
         if track.get("audio2"):
+            sec_size = 0
+            if isinstance(file_sizes, dict) and track["audio2"] in file_sizes:
+                try:
+                    sec_size = int(file_sizes.get(track["audio2"], 0) or 0)
+                except (TypeError, ValueError):
+                    sec_size = 0
             info["secondary"] = {
                 "filename": track["audio2"],
                 "data": "",
-                "duration_ms": 0
+                "duration_ms": 0,
+                "size": sec_size
             }
         return info
 
@@ -2334,6 +2375,21 @@ class PlanEditorMainWindow(QMainWindow):
         if not isinstance(tracks, list):
             QMessageBox.warning(self, "Ошибка", "Выбранный файл не соответствует формату tracks.json.")
             return
+
+        file_sizes: dict[str, int] = {}
+        files_section = data.get("files") if isinstance(data, dict) else None
+        if isinstance(files_section, list):
+            for entry in files_section:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                try:
+                    size_value = int(entry.get("size") or 0)
+                except (TypeError, ValueError):
+                    continue
+                file_sizes[name] = max(size_value, file_sizes.get(name, 0), 0)
 
         prev_state = self.capture_state()
         hall_map = {h.number: h for h in self.halls}
@@ -2353,7 +2409,7 @@ class PlanEditorMainWindow(QMainWindow):
                 track_id = int(entry.get("id"))
             except (TypeError, ValueError):
                 continue
-            audio_info = self._build_audio_info_from_track(entry)
+            audio_info = self._build_audio_info_from_track(entry, file_sizes)
             if not audio_info:
                 continue
             target_hall = None
@@ -2456,16 +2512,39 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().clearMessage()
         self.push_undo_state(prev_state)
 
-    def export_config(self):
-        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", "", "*.json")
+    def export_rooms_config(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт объектов", "", "JSON файлы (*.json)")
         if not fp:
             return
 
-        config = {"rooms": []}
-        audio_files_map = {}
-        track_entries = []
+        rooms_json_text, _ = self._prepare_export_payload()
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(rooms_json_text)
+            self.statusBar().showMessage("Экспорт объектов завершён.", 5000)
+            QMessageBox.information(self, "Экспорт", "Экспорт объектов завершён.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
-        # === helpers ===
+    def export_tracks_config(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт аудиофайлов", "tracks.json", "JSON файлы (*.json)")
+        if not fp:
+            return
+
+        _, tracks_data = self._prepare_export_payload()
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
+            self.statusBar().showMessage("Экспорт аудиофайлов завершён.", 5000)
+            QMessageBox.information(self, "Экспорт", "Экспорт аудиофайлов завершён.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+
+    def _prepare_export_payload(self) -> tuple[str, dict]:
+        config = {"rooms": []}
+        audio_files_map: dict[str, int] = {}
+        track_entries_map: dict[str, dict] = {}
+
         def _bytes_from_b64(b64str: str) -> int:
             if not b64str:
                 return 0
@@ -2474,25 +2553,33 @@ class PlanEditorMainWindow(QMainWindow):
             except Exception:
                 return 0
 
-        def collect_audio_files(info):
-            """Собираем ИМЕНА и РАЗМЕРЫ (в байтах) аудиофайлов для tracks.json."""
-            if not info:
+        def _extract_size(info: dict | None) -> int:
+            if not isinstance(info, dict):
+                return 0
+            try:
+                size_val = int(info.get("size") or 0)
+            except (TypeError, ValueError):
+                size_val = 0
+            if size_val <= 0:
+                size_val = _bytes_from_b64(info.get("data", ""))
+            return max(size_val, 0)
+
+        def collect_audio_files(info: dict | None):
+            if not isinstance(info, dict):
                 return
             name = info.get("filename")
-            if name:
-                size_bytes = _bytes_from_b64(info.get("data", ""))
-                audio_files_map[name] = max(size_bytes, audio_files_map.get(name, 0))
-
+            if isinstance(name, str) and name:
+                size_bytes = _extract_size(info)
+                audio_files_map[name] = max(audio_files_map.get(name, 0), size_bytes)
             secondary = info.get("secondary")
             if isinstance(secondary, dict):
                 sec_name = secondary.get("filename")
-                if sec_name:
-                    size_bytes2 = _bytes_from_b64(secondary.get("data", ""))
-                    audio_files_map[sec_name] = max(size_bytes2, audio_files_map.get(sec_name, 0))
+                if isinstance(sec_name, str) and sec_name:
+                    size_bytes2 = _extract_size(secondary)
+                    audio_files_map[sec_name] = max(audio_files_map.get(sec_name, 0), size_bytes2)
 
-        def create_track_entry(info, room_id, is_hall):
-            """Структура трека; 'multi_id' добавляем ТОЛЬКО при наличии доп. ID."""
-            if not info:
+        def create_track_entry(info: dict | None, room_id: int, is_hall: bool):
+            if not isinstance(info, dict):
                 return None
             filename = info.get("filename")
             if not filename:
@@ -2511,7 +2598,6 @@ class PlanEditorMainWindow(QMainWindow):
                 "term": bool(info.get("interruptible", True))
             }
 
-            # только если есть хотя бы один дополнительный id
             if extras:
                 seen = set()
                 merged = []
@@ -2527,9 +2613,53 @@ class PlanEditorMainWindow(QMainWindow):
                 entry["audio2"] = secondary["filename"]
             return entry
 
+        def register_track_entry(entry: dict | None):
+            if not isinstance(entry, dict):
+                return
+            key = entry.get("audio")
+            if not key:
+                return
+            existing = track_entries_map.get(key)
+            if existing is None:
+                track_entries_map[key] = entry
+                return
+
+            existing["hall"] = bool(existing.get("hall")) or bool(entry.get("hall"))
+
+            new_room = entry.get("room_id")
+            old_room = existing.get("room_id")
+            if isinstance(new_room, int):
+                if not isinstance(old_room, int):
+                    existing["room_id"] = new_room
+                else:
+                    existing["room_id"] = min(old_room, new_room)
+
+            if entry.get("audio2") and not existing.get("audio2"):
+                existing["audio2"] = entry["audio2"]
+
+            existing["play_once"] = bool(existing.get("play_once")) or bool(entry.get("play_once"))
+            existing["reset"] = bool(existing.get("reset")) or bool(entry.get("reset"))
+            existing["term"] = bool(existing.get("term", True)) and bool(entry.get("term", True))
+
+            combined_ids: set[int] = set()
+            for value in (existing.get("id"), entry.get("id")):
+                if isinstance(value, int):
+                    combined_ids.add(value)
+            for seq in (existing.get("multi_id"), entry.get("multi_id")):
+                if isinstance(seq, list):
+                    for value in seq:
+                        if isinstance(value, int):
+                            combined_ids.add(value)
+            base_id = existing.get("id")
+            if isinstance(base_id, int) and base_id in combined_ids:
+                combined_ids.remove(base_id)
+            if combined_ids:
+                existing["multi_id"] = sorted(combined_ids)
+            elif "multi_id" in existing:
+                existing.pop("multi_id")
+
         # === rooms.json ===
         for h in self.halls:
-            # ширина/высота зала в метрах
             w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
             h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
 
@@ -2541,7 +2671,6 @@ class PlanEditorMainWindow(QMainWindow):
                 "zones": []
             }
 
-            # anchors
             for a in self.anchors:
                 if a.main_hall_number == h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
@@ -2552,8 +2681,7 @@ class PlanEditorMainWindow(QMainWindow):
                         ae["bound"] = True
                     room["anchors"].append(ae)
 
-            # zones
-            zones = {}
+            zones: dict[int, dict] = {}
             default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for ch in h.childItems():
                 if isinstance(ch, RectZoneItem):
@@ -2574,21 +2702,15 @@ class PlanEditorMainWindow(QMainWindow):
 
             config["rooms"].append(room)
 
-            # аудио для tracks.json (sizes в байтах)
             if h.audio_settings:
                 collect_audio_files(h.audio_settings)
-                entry = create_track_entry(h.audio_settings, h.number, True)
-                if entry:
-                    track_entries.append(entry)
+                register_track_entry(create_track_entry(h.audio_settings, h.number, True))
             for _, audio_info in sorted(h.zone_audio_tracks.items()):
                 if not audio_info:
                     continue
                 collect_audio_files(audio_info)
-                entry = create_track_entry(audio_info, h.number, False)
-                if entry:
-                    track_entries.append(entry)
+                register_track_entry(create_track_entry(audio_info, h.number, False))
 
-        # Сохраняем rooms.json (как текст для читабельности)
         rooms_strs = []
         for room in config["rooms"]:
             lines = [
@@ -2633,8 +2755,23 @@ class PlanEditorMainWindow(QMainWindow):
 
         rooms_json_text = '{\n"rooms": [\n' + ",\n".join(rooms_strs) + "\n]\n}"
 
-        # === tracks.json (files.size в байтах) ===
-        track_entries.sort(key=lambda item: (item["room_id"], not item["hall"], item["id"]))
+        track_entries = list(track_entries_map.values())
+
+        def _sort_key(item: dict):
+            room_id = item.get("room_id")
+            if not isinstance(room_id, int):
+                try:
+                    room_id = int(room_id)
+                except (TypeError, ValueError):
+                    room_id = 0
+            return (
+                room_id,
+                not bool(item.get("hall")),
+                item.get("id", 0),
+                item.get("audio", "")
+            )
+
+        track_entries.sort(key=_sort_key)
         files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
         tracks_data = {
             "files": files_list,
@@ -2642,16 +2779,8 @@ class PlanEditorMainWindow(QMainWindow):
             "tracks": track_entries,
             "version": datetime.now().strftime("%y%m%d")
         }
-        tracks_path = os.path.join(os.path.dirname(fp), "tracks.json")
 
-        try:
-            with open(fp, "w", encoding="utf-8") as f:
-                f.write(rooms_json_text)
-            with open(tracks_path, "w", encoding="utf-8") as f:
-                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
-            QMessageBox.information(self, "Экспорт", "Экспорт завершён. Обновлены rooms.json и tracks.json.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+        return rooms_json_text, tracks_data
 
     def closeEvent(self, event):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
