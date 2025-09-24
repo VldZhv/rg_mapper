@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox, QStyle
+    QGroupBox, QStyle, QTextBrowser
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
@@ -1327,6 +1327,9 @@ class PlanEditorMainWindow(QMainWindow):
 
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
+        self._readme_path = os.path.join(os.path.dirname(__file__), "readme.md")
+        self._cached_readme_text = None
+        self._cached_version = None
 
         self.scene = PlanGraphicsScene(); self.scene.mainwindow=self
         self.scene.selectionChanged.connect(self.on_scene_selection_changed)
@@ -1466,6 +1469,12 @@ class PlanEditorMainWindow(QMainWindow):
         self.undo_action.setEnabled(False)
         self.undo_action.triggered.connect(self.undo_last_action)
 
+        self.action_help = QAction("Справка по RG Tags Mapper", self)
+        self.action_help.triggered.connect(self.show_help_contents)
+
+        self.action_about = QAction("О приложении...", self)
+        self.action_about.triggered.connect(self.show_about_dialog)
+
     def _create_menus(self):
         menu_bar = self.menuBar()
 
@@ -1489,6 +1498,11 @@ class PlanEditorMainWindow(QMainWindow):
         tools_menu.addAction(self.action_add_hall)
         tools_menu.addAction(self.action_add_anchor)
         tools_menu.addAction(self.action_add_zone)
+
+        help_menu = menu_bar.addMenu("Справка")
+        help_menu.addAction(self.action_help)
+        help_menu.addSeparator()
+        help_menu.addAction(self.action_about)
 
     def _create_toolbars(self):
         icon_size = QSize(48, 48)
@@ -1518,6 +1532,93 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.undo_action)
         self.addToolBar(tools_toolbar)
+
+    def _load_readme_text(self) -> str | None:
+        if self._cached_readme_text is not None:
+            return self._cached_readme_text
+        if not os.path.exists(self._readme_path):
+            return None
+        try:
+            with open(self._readme_path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            return None
+        self._cached_readme_text = text
+        return text
+
+    def _get_app_version(self) -> str:
+        if self._cached_version is not None:
+            return self._cached_version
+        if not os.path.exists(self._readme_path):
+            self._cached_version = "неизвестна"
+            return self._cached_version
+        try:
+            with open(self._readme_path, "r", encoding="utf-8") as fh:
+                first_line = fh.readline().strip()
+        except OSError:
+            first_line = ""
+        self._cached_version = first_line or "неизвестна"
+        return self._cached_version
+
+    def show_help_contents(self):
+        text = self._load_readme_text()
+        if text is None:
+            QMessageBox.warning(self, "Справка", "Не удалось загрузить файл справки.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Справка по RG Tags Mapper")
+        layout = QVBoxLayout(dialog)
+
+        browser = QTextBrowser(dialog)
+        browser.setPlainText(text)
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(700, 500)
+        dialog.exec()
+
+    def show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("О приложении")
+        layout = QVBoxLayout(dialog)
+
+        icon_path = os.path.join(self._icons_dir, "app.png")
+        if os.path.exists(icon_path):
+            logo_label = QLabel(dialog)
+            pixmap = QPixmap(icon_path)
+            if not pixmap.isNull():
+                logo_label.setPixmap(pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                logo_label.setAlignment(Qt.AlignCenter)
+                layout.addWidget(logo_label)
+
+        title_label = QLabel("RG Tags Mapper", dialog)
+        title_font = QFont(title_label.font())
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        version_label = QLabel(f"Версия {self._get_app_version()}", dialog)
+        version_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(version_label)
+
+        copyright_label = QLabel("Copyright (C) 2025, RadioGuide LLC", dialog)
+        copyright_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(copyright_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(400, 300)
+        dialog.exec()
 
     def _toolbar_group_spacing(self, toolbar: QToolBar) -> int:
         base_spacing = toolbar.style().pixelMetric(QStyle.PM_ToolBarItemSpacing, None, toolbar)
