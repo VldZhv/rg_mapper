@@ -6,13 +6,13 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox
+    QGroupBox, QStyle, QTextBrowser
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor, QKeySequence
+    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint
+from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
 from mutagen.mp3 import MP3
 
@@ -1325,6 +1325,12 @@ class PlanEditorMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("RG Tags Mapper"); self.resize(1200,800)
 
+        self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+        self._apply_app_icon()
+        self._readme_path = os.path.join(os.path.dirname(__file__), "readme.md")
+        self._cached_readme_text = None
+        self._cached_version = None
+
         self.scene = PlanGraphicsScene(); self.scene.mainwindow=self
         self.scene.selectionChanged.connect(self.on_scene_selection_changed)
         self.view = MyGraphicsView(self.scene)
@@ -1341,35 +1347,9 @@ class PlanEditorMainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
-        toolbar = QToolBar("Инструменты", self); self.addToolBar(toolbar)
-        act_open = QAction("Открыть изображение", self)
-        act_cal = QAction("Выполнить калибровку", self)
-        toolbar.addAction(act_open); toolbar.addAction(act_cal); toolbar.addSeparator()
-        act_save = QAction("Сохранить проект", self); act_load = QAction("Загрузить проект", self)
-        toolbar.addAction(act_save); toolbar.addAction(act_load)
-        self.undo_action = QAction("Отменить", self)
-        self.undo_action.setShortcut(QKeySequence.Undo)
-        self.undo_action.setEnabled(False)
-        toolbar.addAction(self.undo_action); toolbar.addSeparator()
-        act_add_hall = QAction("Добавить зал", self)
-        act_add_anchor = QAction("Добавить якорь", self)
-        act_add_zone = QAction("Добавить зону", self)
-        toolbar.addAction(act_add_hall); toolbar.addAction(act_add_anchor); toolbar.addAction(act_add_zone)
-        self.act_lock = QAction("Закрепить объекты", self); toolbar.addAction(self.act_lock); toolbar.addSeparator()
-        act_export = QAction("Экспорт конфигурации", self); toolbar.addAction(act_export)
-        act_pdf = QAction("Сохранить в PDF", self); toolbar.addAction(act_pdf)
-
-        act_open.triggered.connect(self.open_image)
-        act_cal.triggered.connect(self.perform_calibration)
-        act_save.triggered.connect(self.save_project)
-        act_load.triggered.connect(self.load_project)
-        act_export.triggered.connect(self.export_config)
-        act_pdf.triggered.connect(self.save_to_pdf)
-        act_add_hall.triggered.connect(lambda: self.set_mode("hall"))
-        act_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
-        act_add_zone.triggered.connect(lambda: self.set_mode("zone"))
-        self.act_lock.triggered.connect(self.lock_objects)
-        self.undo_action.triggered.connect(self.undo_last_action)
+        self._create_actions()
+        self._create_menus()
+        self._create_toolbars()
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1390,6 +1370,269 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
+
+    def _apply_app_icon(self):
+        icon_path = os.path.join(self._icons_dir, "app.png")
+        if not os.path.exists(icon_path):
+            return
+        icon = QIcon(icon_path)
+        self.setWindowIcon(icon)
+        app = QApplication.instance()
+        if app is not None:
+            app.setWindowIcon(icon)
+
+    def _create_actions(self):
+        def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
+            path = os.path.join(self._icons_dir, filename)
+            if os.path.exists(path):
+                return QIcon(path)
+            if fallback is not None:
+                return self.style().standardIcon(fallback)
+            return QIcon()
+
+        self.action_open = QAction(
+            load_icon("open.png", QStyle.SP_DialogOpenButton),
+            "Открыть изображение",
+            self,
+        )
+        self.action_open.triggered.connect(self.open_image)
+
+        self.action_save = QAction(
+            load_icon("save.png", QStyle.SP_DialogSaveButton),
+            "Сохранить проект",
+            self,
+        )
+        self.action_save.triggered.connect(self.save_project)
+
+        self.action_load = QAction(
+            load_icon("load.png", QStyle.SP_DialogOpenButton),
+            "Загрузить проект",
+            self,
+        )
+        self.action_load.triggered.connect(self.load_project)
+
+        self.action_export = QAction(
+            load_icon("export.png", QStyle.SP_DialogSaveButton),
+            "Экспорт конфигурации",
+            self,
+        )
+        self.action_export.triggered.connect(self.export_config)
+
+        self.action_pdf = QAction(
+            load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
+            "Сохранить в PDF",
+            self,
+        )
+        self.action_pdf.triggered.connect(self.save_to_pdf)
+
+        self.action_calibrate = QAction(
+            load_icon("calibration.png", QStyle.SP_ComputerIcon),
+            "Выполнить калибровку",
+            self,
+        )
+        self.action_calibrate.triggered.connect(self.perform_calibration)
+
+        self.action_add_hall = QAction(
+            load_icon("hall.png", QStyle.SP_FileDialogNewFolder),
+            "Добавить зал",
+            self,
+        )
+        self.action_add_hall.triggered.connect(lambda: self.set_mode("hall"))
+
+        self.action_add_anchor = QAction(
+            load_icon("anchor.png", QStyle.SP_FileDialogNewFolder),
+            "Добавить якорь",
+            self,
+        )
+        self.action_add_anchor.triggered.connect(lambda: self.set_mode("anchor"))
+
+        self.action_add_zone = QAction(
+            load_icon("zone.png", QStyle.SP_FileDialogNewFolder),
+            "Добавить зону",
+            self,
+        )
+        self.action_add_zone.triggered.connect(lambda: self.set_mode("zone"))
+
+        self.act_lock = QAction(
+            load_icon("lock.png", QStyle.SP_DialogCloseButton),
+            "Закрепить объекты",
+            self,
+        )
+        self.act_lock.triggered.connect(self.lock_objects)
+
+        self.undo_action = QAction(
+            load_icon("undo.png", QStyle.SP_ArrowBack),
+            "Отменить",
+            self,
+        )
+        self.undo_action.setShortcut(QKeySequence.Undo)
+        self.undo_action.setEnabled(False)
+        self.undo_action.triggered.connect(self.undo_last_action)
+
+        self.action_help = QAction("Справка по RG Tags Mapper", self)
+        self.action_help.triggered.connect(self.show_help_contents)
+
+        self.action_about = QAction("О приложении...", self)
+        self.action_about.triggered.connect(self.show_about_dialog)
+
+    def _create_menus(self):
+        menu_bar = self.menuBar()
+
+        file_menu = menu_bar.addMenu("Файл")
+        file_menu.addAction(self.action_open)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_save)
+        file_menu.addAction(self.action_load)
+        file_menu.addSeparator()
+        file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_pdf)
+
+        edit_menu = menu_bar.addMenu("Правка")
+        edit_menu.addAction(self.undo_action)
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.act_lock)
+
+        tools_menu = menu_bar.addMenu("Инструменты")
+        tools_menu.addAction(self.action_calibrate)
+        tools_menu.addSeparator()
+        tools_menu.addAction(self.action_add_hall)
+        tools_menu.addAction(self.action_add_anchor)
+        tools_menu.addAction(self.action_add_zone)
+
+        help_menu = menu_bar.addMenu("Справка")
+        help_menu.addAction(self.action_help)
+        help_menu.addSeparator()
+        help_menu.addAction(self.action_about)
+
+    def _create_toolbars(self):
+        icon_size = QSize(48, 48)
+
+        file_toolbar = QToolBar("Файл", self)
+        file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        file_toolbar.setIconSize(icon_size)
+        file_toolbar.addAction(self.action_open)
+        self._add_toolbar_group_separator(file_toolbar)
+        file_toolbar.addAction(self.action_save)
+        file_toolbar.addAction(self.action_load)
+        self._add_toolbar_group_separator(file_toolbar)
+        file_toolbar.addAction(self.action_export)
+        file_toolbar.addAction(self.action_pdf)
+        self.addToolBar(file_toolbar)
+
+        tools_toolbar = QToolBar("Инструменты", self)
+        tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tools_toolbar.setIconSize(icon_size)
+        tools_toolbar.addAction(self.action_calibrate)
+        self._add_toolbar_group_separator(tools_toolbar)
+        tools_toolbar.addAction(self.action_add_hall)
+        tools_toolbar.addAction(self.action_add_anchor)
+        tools_toolbar.addAction(self.action_add_zone)
+        self._add_toolbar_group_separator(tools_toolbar)
+        tools_toolbar.addAction(self.act_lock)
+        self._add_toolbar_group_separator(tools_toolbar)
+        tools_toolbar.addAction(self.undo_action)
+        self.addToolBar(tools_toolbar)
+
+    def _load_readme_text(self) -> str | None:
+        if self._cached_readme_text is not None:
+            return self._cached_readme_text
+        if not os.path.exists(self._readme_path):
+            return None
+        try:
+            with open(self._readme_path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+        except OSError:
+            return None
+        self._cached_readme_text = text
+        return text
+
+    def _get_app_version(self) -> str:
+        if self._cached_version is not None:
+            return self._cached_version
+        if not os.path.exists(self._readme_path):
+            self._cached_version = "неизвестна"
+            return self._cached_version
+        try:
+            with open(self._readme_path, "r", encoding="utf-8") as fh:
+                first_line = fh.readline().strip()
+        except OSError:
+            first_line = ""
+        self._cached_version = first_line or "неизвестна"
+        return self._cached_version
+
+    def show_help_contents(self):
+        text = self._load_readme_text()
+        if text is None:
+            QMessageBox.warning(self, "Справка", "Не удалось загрузить файл справки.")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Справка по RG Tags Mapper")
+        layout = QVBoxLayout(dialog)
+
+        browser = QTextBrowser(dialog)
+        browser.setPlainText(text)
+        layout.addWidget(browser)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(700, 500)
+        dialog.exec()
+
+    def show_about_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("О приложении")
+        layout = QVBoxLayout(dialog)
+
+        icon_path = os.path.join(self._icons_dir, "app.png")
+        if os.path.exists(icon_path):
+            logo_label = QLabel(dialog)
+            pixmap = QPixmap(icon_path)
+            if not pixmap.isNull():
+                logo_label.setPixmap(pixmap.scaled(128, 128, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                logo_label.setAlignment(Qt.AlignCenter)
+                layout.addWidget(logo_label)
+
+        title_label = QLabel("RG Tags Mapper", dialog)
+        title_font = QFont(title_label.font())
+        title_font.setPointSize(title_font.pointSize() + 2)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        version_label = QLabel(f"Версия {self._get_app_version()}", dialog)
+        version_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(version_label)
+
+        copyright_label = QLabel("Copyright (C) 2025, RadioGuide LLC", dialog)
+        copyright_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(copyright_label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        layout.addWidget(buttons)
+
+        dialog.resize(400, 300)
+        dialog.exec()
+
+    def _toolbar_group_spacing(self, toolbar: QToolBar) -> int:
+        base_spacing = toolbar.style().pixelMetric(QStyle.PM_ToolBarItemSpacing, None, toolbar)
+        if base_spacing <= 0:
+            base_spacing = max(8, toolbar.iconSize().width() // 4)
+        return base_spacing
+
+    def _add_toolbar_group_separator(self, toolbar: QToolBar):
+        toolbar.addSeparator()
+        spacer = QWidget(toolbar)
+        spacer.setFixedWidth(self._toolbar_group_spacing(toolbar))
+        spacer.setAttribute(Qt.WA_TransparentForMouseEvents)
+        spacer.setFocusPolicy(Qt.NoFocus)
+        toolbar.addWidget(spacer)
 
     def _reset_background_cache(self):
         self._undo_bg_cache_key = None
@@ -1603,7 +1846,7 @@ class PlanEditorMainWindow(QMainWindow):
         if not self.scene.pixmap:
             QMessageBox.warning(self, "Ошибка", "Сначала загрузите изображение!"); return
         self.set_mode("calibrate")
-        self.statusBar().showMessage("Нажмите на 2 точки для калибровки")
+        self.statusBar().showMessage("Укажите 2 точки на плане для обозначения отрезка известной длины")
     def resnap_objects(self):
         step = self.scene.pixel_per_cm_x * self.scene.grid_step_cm
         for h in self.halls:
@@ -2119,6 +2362,10 @@ class PlanEditorMainWindow(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(os.getenv("QT_FORCE_STDERR_LOGGING") and sys.argv or sys.argv)
+    icons_dir = os.path.join(os.path.dirname(__file__), "icons")
+    app_icon_path = os.path.join(icons_dir, "app.png")
+    if os.path.exists(app_icon_path):
+        app.setWindowIcon(QIcon(app_icon_path))
     window = PlanEditorMainWindow()
     window.show()
     sys.exit(app.exec())
