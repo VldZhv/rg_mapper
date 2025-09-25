@@ -1416,16 +1416,29 @@ class PlanEditorMainWindow(QMainWindow):
         central_layout = QVBoxLayout(central_widget)
         margin = 8
         central_layout.setContentsMargins(margin, margin, margin, margin)
+
+        central_frame = QWidget()
+        central_frame.setObjectName("centralFrame")
+        frame_layout = QVBoxLayout(central_frame)
+        frame_layout.setContentsMargins(12, 12, 12, 12)
+        frame_layout.addWidget(self.view)
+
         central_widget.setStyleSheet(
             """
             QWidget#centralContainer {
-                border: 2px solid #a0a0a0;
-                border-radius: 6px;
                 background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#centralFrame {
+                border: 2px solid #a0a0a0;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#centralFrame > * {
+                background-color: transparent;
             }
             """
         )
-        central_layout.addWidget(self.view)
+        central_layout.addWidget(central_frame)
         self.setCentralWidget(central_widget)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("Объекты"); self.tree.setWordWrap(True)
@@ -1437,16 +1450,32 @@ class PlanEditorMainWindow(QMainWindow):
         dock_container.setObjectName("dockContainer")
         dock_layout = QVBoxLayout(dock_container)
         dock_layout.setContentsMargins(margin, margin, margin, margin)
+
+        dock_frame = QWidget()
+        dock_frame.setObjectName("dockFrame")
+        dock_frame_layout = QVBoxLayout(dock_frame)
+        dock_frame_layout.setContentsMargins(12, 12, 12, 12)
+        dock_frame_layout.addWidget(self.tree)
+
         dock_container.setStyleSheet(
             """
             QWidget#dockContainer {
-                border: 2px solid #a0a0a0;
-                border-radius: 6px;
                 background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#dockFrame {
+                border: 2px solid #a0a0a0;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#dockFrame > * {
+                background-color: transparent;
+            }
+            QTreeWidget {
+                background-color: transparent;
             }
             """
         )
-        dock_layout.addWidget(self.tree)
+        dock_layout.addWidget(dock_frame)
 
         dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
         dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
@@ -1624,6 +1653,23 @@ class PlanEditorMainWindow(QMainWindow):
         help_menu.addSeparator()
         help_menu.addAction(self.action_about)
 
+        menu_bar.setStyleSheet(
+            """
+            QMenuBar {
+                background-color: rgba(255, 255, 255, 235);
+                border-bottom: 1px solid #b8b8b8;
+                padding: 4px 6px;
+            }
+            QMenuBar::item {
+                padding: 4px 10px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected {
+                background-color: rgba(240, 240, 240, 220);
+            }
+            """
+        )
+
     def _create_toolbars(self):
         base_icon_size = QSize(48, 48)
         scale_factor = 1.2
@@ -1658,6 +1704,39 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.undo_action)
         self.addToolBar(tools_toolbar)
+
+        toolbar_stylesheet = (
+            """
+            QToolBar {
+                background-color: rgba(255, 255, 255, 235);
+                border-top: 1px solid #c6c6c6;
+                border-bottom: 1px solid #a9a9a9;
+                padding: 6px 8px;
+                spacing: 8px;
+            }
+            QToolBar::separator {
+                width: 1px;
+                background-color: #b5b5b5;
+                margin: 0 6px;
+            }
+            QToolBar QToolButton {
+                margin: 0 4px;
+                padding: 4px;
+                border-radius: 4px;
+            }
+            QToolBar QToolButton:hover {
+                background-color: rgba(240, 240, 240, 220);
+            }
+            QToolBar QToolButton:pressed {
+                background-color: rgba(225, 225, 225, 220);
+            }
+            """
+        )
+
+        for toolbar in (file_toolbar, tools_toolbar):
+            toolbar.setMovable(False)
+            toolbar.setContentsMargins(6, 4, 6, 4)
+            toolbar.setStyleSheet(toolbar_stylesheet)
 
     def _load_readme_text(self) -> str | None:
         if self._cached_readme_text is not None:
