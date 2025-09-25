@@ -1478,12 +1478,15 @@ class PlanEditorMainWindow(QMainWindow):
         dock_layout.addWidget(dock_frame)
 
         dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
-        dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.objects_dock = dock
 
         self._create_actions()
         self._create_menus()
         self._create_toolbars()
+
+        self.objects_dock.visibilityChanged.connect(self._on_objects_dock_visibility_changed)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1622,6 +1625,11 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_about = QAction("О приложении...", self)
         self.action_about.triggered.connect(self.show_about_dialog)
 
+        self.action_toggle_objects_dock = QAction("Окно \"Список объектов\"", self)
+        self.action_toggle_objects_dock.setCheckable(True)
+        self.action_toggle_objects_dock.setChecked(True)
+        self.action_toggle_objects_dock.toggled.connect(self._toggle_objects_dock)
+
     def _create_menus(self):
         menu_bar = self.menuBar()
 
@@ -1647,6 +1655,9 @@ class PlanEditorMainWindow(QMainWindow):
         tools_menu.addAction(self.action_add_hall)
         tools_menu.addAction(self.action_add_anchor)
         tools_menu.addAction(self.action_add_zone)
+
+        view_menu = menu_bar.addMenu("Вид")
+        view_menu.addAction(self.action_toggle_objects_dock)
 
         help_menu = menu_bar.addMenu("Справка")
         help_menu.addAction(self.action_help)
@@ -1731,6 +1742,18 @@ class PlanEditorMainWindow(QMainWindow):
             }
             """
         )
+
+    def _toggle_objects_dock(self, visible: bool):
+        if getattr(self, "objects_dock", None) is None:
+            return
+        self.objects_dock.setVisible(visible)
+
+    def _on_objects_dock_visibility_changed(self, visible: bool):
+        if getattr(self, "action_toggle_objects_dock", None) is None:
+            return
+        self.action_toggle_objects_dock.blockSignals(True)
+        self.action_toggle_objects_dock.setChecked(visible)
+        self.action_toggle_objects_dock.blockSignals(False)
 
         for toolbar in (file_toolbar, tools_toolbar):
             toolbar.setMovable(False)
