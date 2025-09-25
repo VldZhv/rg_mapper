@@ -324,7 +324,7 @@ class TracksListWidget(QWidget):
                 hall_item.setData(0, Qt.UserRole, {"type": "hall", "hall": hall.number})
                 hall_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.tree.addTopLevelItem(hall_item)
-                self.tree.setFirstColumnSpanned(hall_item, 0, True)
+                hall_item.setFirstColumnSpanned(True)
                 hall_item.setExpanded(True)
 
                 if hall.audio_settings:
@@ -2013,6 +2013,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_toolbar.addAction(self.action_export)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
+        self.file_toolbar = file_toolbar
 
         tools_toolbar = QToolBar("Инструменты", self)
         tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -2027,6 +2028,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.undo_action)
         self.addToolBar(tools_toolbar)
+        self.tools_toolbar = tools_toolbar
 
         toolbar_stylesheet = (
             """
@@ -2054,6 +2056,7 @@ class PlanEditorMainWindow(QMainWindow):
             }
             """
         )
+        self._toolbar_stylesheet = toolbar_stylesheet
 
     def _toggle_objects_dock(self, visible: bool):
         if getattr(self, "objects_dock", None) is None:
@@ -2067,12 +2070,14 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_toggle_objects_dock.setChecked(visible)
         self.action_toggle_objects_dock.blockSignals(False)
 
-        for toolbar in (file_toolbar, tools_toolbar):
+        for toolbar in (getattr(self, "file_toolbar", None), getattr(self, "tools_toolbar", None)):
+            if toolbar is None:
+                continue
             toolbar.setMovable(False)
             toolbar.setContentsMargins(6, 3, 6, 3)
             if toolbar.layout():
                 toolbar.layout().setSpacing(8)
-            toolbar.setStyleSheet(toolbar_stylesheet)
+            toolbar.setStyleSheet(getattr(self, "_toolbar_stylesheet", ""))
 
     def _toggle_tracks_dock(self, visible: bool):
         if getattr(self, "tracks_dock", None) is None:
