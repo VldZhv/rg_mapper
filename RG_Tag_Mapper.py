@@ -1396,7 +1396,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
 
-        dark_color = QColor("#2c2c2c")
+        dark_color = QColor("#e3e3e3")
         palette = self.palette()
         palette.setColor(QPalette.Window, dark_color)
         self.setPalette(palette)
