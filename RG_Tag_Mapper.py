@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon
+    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon, QPalette
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
@@ -1395,6 +1395,12 @@ class PlanEditorMainWindow(QMainWindow):
 
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
+
+        dark_color = QColor("#2c2c2c")
+        palette = self.palette()
+        palette.setColor(QPalette.Window, dark_color)
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
         self._readme_path = os.path.join(os.path.dirname(__file__), "readme.md")
         self._cached_readme_text = None
         self._cached_version = None
@@ -1407,7 +1413,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         central_widget = QWidget()
         central_layout = QVBoxLayout(central_widget)
-        margin = 12
+        margin = 16
         central_layout.setContentsMargins(margin, margin, margin, margin)
         central_layout.addWidget(self.view)
         self.setCentralWidget(central_widget)
@@ -1417,7 +1423,12 @@ class PlanEditorMainWindow(QMainWindow):
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
         self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
-        dock = QDockWidget("Список объектов", self); dock.setWidget(self.tree)
+        dock_container = QWidget()
+        dock_layout = QVBoxLayout(dock_container)
+        dock_layout.setContentsMargins(margin, margin, margin, margin)
+        dock_layout.addWidget(self.tree)
+
+        dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
         dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
