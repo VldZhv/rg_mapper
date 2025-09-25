@@ -1420,7 +1420,7 @@ class PlanEditorMainWindow(QMainWindow):
         central_frame = QWidget()
         central_frame.setObjectName("centralFrame")
         frame_layout = QVBoxLayout(central_frame)
-        frame_layout.setContentsMargins(12, 12, 12, 12)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
         frame_layout.addWidget(self.view)
 
         central_widget.setStyleSheet(
@@ -1429,7 +1429,7 @@ class PlanEditorMainWindow(QMainWindow):
                 background-color: rgba(255, 255, 255, 25);
             }
             QWidget#centralFrame {
-                border: 2px solid #a0a0a0;
+                border: none;
                 border-radius: 8px;
                 background-color: rgba(255, 255, 255, 235);
             }
@@ -1454,7 +1454,7 @@ class PlanEditorMainWindow(QMainWindow):
         dock_frame = QWidget()
         dock_frame.setObjectName("dockFrame")
         dock_frame_layout = QVBoxLayout(dock_frame)
-        dock_frame_layout.setContentsMargins(12, 12, 12, 12)
+        dock_frame_layout.setContentsMargins(0, 0, 0, 0)
         dock_frame_layout.addWidget(self.tree)
 
         dock_container.setStyleSheet(
@@ -1463,7 +1463,7 @@ class PlanEditorMainWindow(QMainWindow):
                 background-color: rgba(255, 255, 255, 25);
             }
             QWidget#dockFrame {
-                border: 2px solid #a0a0a0;
+                border: none;
                 border-radius: 8px;
                 background-color: rgba(255, 255, 255, 235);
             }
@@ -1712,7 +1712,6 @@ class PlanEditorMainWindow(QMainWindow):
                 border-top: 1px solid #c6c6c6;
                 border-bottom: 1px solid #a9a9a9;
                 padding: 6px 8px;
-                spacing: 8px;
             }
             QToolBar::separator {
                 width: 1px;
@@ -1720,7 +1719,7 @@ class PlanEditorMainWindow(QMainWindow):
                 margin: 0 6px;
             }
             QToolBar QToolButton {
-                margin: 0 4px;
+                margin: 4px;
                 padding: 4px;
                 border-radius: 4px;
             }
@@ -1735,7 +1734,9 @@ class PlanEditorMainWindow(QMainWindow):
 
         for toolbar in (file_toolbar, tools_toolbar):
             toolbar.setMovable(False)
-            toolbar.setContentsMargins(6, 4, 6, 4)
+            toolbar.setContentsMargins(6, 6, 6, 6)
+            if toolbar.layout():
+                toolbar.layout().setSpacing(8)
             toolbar.setStyleSheet(toolbar_stylesheet)
 
     def _load_readme_text(self) -> str | None:
