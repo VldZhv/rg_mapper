@@ -1711,7 +1711,7 @@ class PlanEditorMainWindow(QMainWindow):
                 background-color: rgba(255, 255, 255, 235);
                 border-top: 1px solid #c6c6c6;
                 border-bottom: 1px solid #a9a9a9;
-                padding: 6px 8px;
+                padding: 3px 8px;
             }
             QToolBar::separator {
                 width: 1px;
@@ -1719,8 +1719,8 @@ class PlanEditorMainWindow(QMainWindow):
                 margin: 0 6px;
             }
             QToolBar QToolButton {
-                margin: 4px;
-                padding: 4px;
+                margin: 2px 4px;
+                padding: 2px 4px;
                 border-radius: 4px;
             }
             QToolBar QToolButton:hover {
@@ -1734,7 +1734,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         for toolbar in (file_toolbar, tools_toolbar):
             toolbar.setMovable(False)
-            toolbar.setContentsMargins(6, 6, 6, 6)
+            toolbar.setContentsMargins(6, 3, 6, 3)
             if toolbar.layout():
                 toolbar.layout().setSpacing(8)
             toolbar.setStyleSheet(toolbar_stylesheet)
