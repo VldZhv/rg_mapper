@@ -1111,49 +1111,89 @@ class MyGraphicsView(QGraphicsView):
     def __init__(self, scene):
         super().__init__(scene)
         self._panning = False
+        self._pan_candidate = False
+        self._pan_moved = False
         self._pan_start = QPoint()
+        self._pan_last_pos = QPoint()
         self.viewport().setCursor(Qt.ArrowCursor)
 
     def mousePressEvent(self, event):
         scene = self.scene()
         mw = scene.mainwindow if scene else None
-        if event.button() in (Qt.LeftButton, Qt.MiddleButton):
-            should_pan = False
-            if event.button() == Qt.MiddleButton:
-                should_pan = True
-            elif event.button() == Qt.LeftButton:
-                if not (mw and mw.add_mode):
-                    point = event.position().toPoint()
-                    if self.itemAt(point) is None:
-                        should_pan = True
-            if should_pan:
-                self._panning = True
-                self._pan_start = event.position().toPoint()
-                self.viewport().setCursor(Qt.ClosedHandCursor)
-                event.accept()
-                return
+        self._pan_candidate = False
+        if event.button() == Qt.MiddleButton:
+            self._panning = True
+            self._pan_moved = False
+            self._pan_start = event.position().toPoint()
+            self._pan_last_pos = self._pan_start
+            self.viewport().setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and not (mw and mw.add_mode):
+            point = event.position().toPoint()
+            item = self.itemAt(point)
+            movable = False
+            while item is not None:
+                if item.flags() & QGraphicsItem.ItemIsMovable:
+                    movable = True
+                    break
+                item = item.parentItem()
+            if not movable:
+                self._pan_candidate = True
+                self._pan_moved = False
+                self._pan_start = point
+                self._pan_last_pos = point
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
         if self._panning:
             pos = event.position().toPoint()
-            delta = pos - self._pan_start
-            self._pan_start = pos
-            hbar = self.horizontalScrollBar()
-            vbar = self.verticalScrollBar()
-            hbar.setValue(hbar.value() - delta.x())
-            vbar.setValue(vbar.value() - delta.y())
+            delta = pos - self._pan_last_pos
+            self._pan_last_pos = pos
+            if not delta.isNull():
+                self._pan_moved = True
+                hbar = self.horizontalScrollBar()
+                vbar = self.verticalScrollBar()
+                hbar.setValue(hbar.value() - delta.x())
+                vbar.setValue(vbar.value() - delta.y())
             event.accept()
             return
+        if self._pan_candidate and (event.buttons() & Qt.LeftButton):
+            pos = event.position().toPoint()
+            if (pos - self._pan_start).manhattanLength() >= QApplication.startDragDistance():
+                delta = pos - self._pan_last_pos
+                self._panning = True
+                self._pan_candidate = False
+                self.viewport().setCursor(Qt.ClosedHandCursor)
+                self._pan_last_pos = pos
+                if not delta.isNull():
+                    self._pan_moved = True
+                    hbar = self.horizontalScrollBar()
+                    vbar = self.verticalScrollBar()
+                    hbar.setValue(hbar.value() - delta.x())
+                    vbar.setValue(vbar.value() - delta.y())
+                event.accept()
+                return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._panning and event.button() in (Qt.LeftButton, Qt.MiddleButton):
+        handled = False
+        if event.button() == Qt.MiddleButton and self._panning:
             self._panning = False
             self.viewport().setCursor(Qt.ArrowCursor)
+            handled = True
+        elif event.button() == Qt.LeftButton:
+            if self._panning:
+                self._panning = False
+                self.viewport().setCursor(Qt.ArrowCursor)
+                handled = self._pan_moved
+            self._pan_candidate = False
+        if handled:
+            self._pan_moved = False
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+            self._pan_moved = False
         try:
             QTimer.singleShot(0, self.scene().mainwindow.update_tree_selection)
         except:
