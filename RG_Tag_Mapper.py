@@ -482,8 +482,13 @@ class ZoneEditDialog(QDialog):
         self.angle_spin.setValue(int(data['angle']))
         form.addRow("Угол поворота (°)", self.angle_spin)
 
+        self._stored_audio_data = copy.deepcopy(audio_data) if audio_data else None
         self.audio_widget = AudioTrackWidget(self, audio_data)
         layout.addWidget(self.audio_widget)
+
+        self._audio_controls_enabled = False
+        self.type_combo.currentTextChanged.connect(self._on_type_changed)
+        self._on_type_changed(self.type_combo.currentText())
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -492,6 +497,12 @@ class ZoneEditDialog(QDialog):
 
     def values(self):
         full_type = {"Входная": "Входная зона", "Выходная": "Выходная зона", "Переходная": "Переходная"}[self.type_combo.currentText()]
+        audio_data = self.audio_widget.get_data() if self._audio_controls_enabled else self._stored_audio_data
+        if audio_data:
+            audio_data = copy.deepcopy(audio_data)
+            self._stored_audio_data = copy.deepcopy(audio_data)
+        else:
+            self._stored_audio_data = None
         return {
             'zone_num': self.num_spin.value(),
             'zone_type': full_type,
@@ -500,8 +511,26 @@ class ZoneEditDialog(QDialog):
             'w': self.w_spin.value(),
             'h': self.h_spin.value(),
             'angle': self.angle_spin.value(),
-            'audio': self.audio_widget.get_data()
+            'audio': audio_data
         }
+
+    def _on_type_changed(self, text: str):
+        is_entry_zone = text == "Входная"
+        if is_entry_zone:
+            if not self._audio_controls_enabled:
+                if self._stored_audio_data:
+                    self.audio_widget.set_data(copy.deepcopy(self._stored_audio_data))
+                else:
+                    self.audio_widget.set_data(None)
+            self.audio_widget.setVisible(True)
+            self.audio_widget.setEnabled(True)
+            self._audio_controls_enabled = True
+        else:
+            if self._audio_controls_enabled:
+                self._stored_audio_data = self.audio_widget.get_data()
+            self.audio_widget.setVisible(False)
+            self.audio_widget.setEnabled(False)
+            self._audio_controls_enabled = False
 
 # ---------------------------------------------------------------------------
 # HallItem
