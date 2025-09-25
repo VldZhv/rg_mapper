@@ -935,6 +935,21 @@ class RectZoneItem(QGraphicsRectItem):
         audio_info = None
         if isinstance(hall, HallItem):
             audio_info = hall.zone_audio_tracks.get(self.zone_num)
+        if (
+            not audio_info
+            and self.zone_type in ("Переходная", "Переходная зона")
+            and mw
+        ):
+            for candidate in mw.halls:
+                same_number = candidate.number == self.zone_num
+                if not same_number:
+                    try:
+                        same_number = int(candidate.number) == int(self.zone_num)
+                    except (TypeError, ValueError):
+                        same_number = False
+                if same_number and candidate.audio_settings:
+                    audio_info = candidate.audio_settings
+                    break
         if audio_info:
             audio_line = format_audio_menu_line(audio_info)
             if audio_line:
