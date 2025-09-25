@@ -1404,7 +1404,13 @@ class PlanEditorMainWindow(QMainWindow):
         self.view = MyGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setCentralWidget(self.view)
+
+        central_widget = QWidget()
+        central_layout = QVBoxLayout(central_widget)
+        margin = 12
+        central_layout.setContentsMargins(margin, margin, margin, margin)
+        central_layout.addWidget(self.view)
+        self.setCentralWidget(central_widget)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("Объекты"); self.tree.setWordWrap(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
