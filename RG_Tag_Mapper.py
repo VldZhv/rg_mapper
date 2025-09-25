@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox, QStyle, QTextBrowser
+    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
@@ -79,6 +79,7 @@ class AudioTrackWidget(QWidget):
         super().__init__(parent)
         self.main_file_info = None
         self.secondary_file_info = None
+        self.display_name = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -156,6 +157,7 @@ class AudioTrackWidget(QWidget):
             'duration_ms': data.get('duration_ms', 0),
             'size': data.get('size', 0)
         }
+        self.display_name = data.get('display_name', "") if isinstance(data, dict) else ""
         self.secondary_file_info = None
         if data.get('secondary'):
             sec = data['secondary']
@@ -184,6 +186,9 @@ class AudioTrackWidget(QWidget):
             'reset': self.reset_box.isChecked(),
             'play_once': self.play_once_box.isChecked()
         }
+        name_text = (self.display_name or "").strip()
+        if name_text:
+            result['display_name'] = name_text
         if self.secondary_file_info:
             result['secondary'] = {
                 'filename': self.secondary_file_info['filename'],
@@ -203,6 +208,7 @@ class AudioTrackWidget(QWidget):
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
             return
         self.main_file_info = info
+        self.display_name = ""
         if not self.interruptible_box.isChecked():
             self.interruptible_box.setChecked(True)
         self._update_state()
@@ -222,6 +228,7 @@ class AudioTrackWidget(QWidget):
     def _clear_main_file(self):
         self.main_file_info = None
         self.secondary_file_info = None
+        self.display_name = ""
         self.extra_ids_edit.clear()
         self.interruptible_box.setChecked(True)
         self.reset_box.setChecked(False)
@@ -249,6 +256,243 @@ class AudioTrackWidget(QWidget):
             self.secondary_label.setText(self.secondary_file_info.get('filename', ''))
         else:
             self.secondary_label.setText("Не выбран")
+
+# ---------------------------------------------------------------------------
+# Track list dock
+# ---------------------------------------------------------------------------
+class TracksListWidget(QWidget):
+    HEADER_LABELS = [
+        "Зал / Трек",
+        "Аудиофайл",
+        "Имя",
+        "Играть единожды",
+        "Сброс",
+        "Прерываемый",
+        "Номер зала",
+        "Доп. ID",
+    ]
+
+    def __init__(self, mainwindow):
+        super().__init__(mainwindow)
+        self.mainwindow = mainwindow
+        self._updating = False
+        self._pending_snapshot = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setColumnCount(len(self.HEADER_LABELS))
+        self.tree.setHeaderLabels(self.HEADER_LABELS)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        self.tree.itemChanged.connect(self._on_item_changed)
+
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Stretch)
+        header.setSectionResizeMode(2, QHeaderView.Stretch)
+        for col in (3, 4, 5):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.Stretch)
+
+        layout.addWidget(self.tree)
+
+    def refresh(self):
+        if not hasattr(self.mainwindow, "halls"):
+            return
+        self._updating = True
+        try:
+            self.tree.clear()
+            halls = sorted(self.mainwindow.halls, key=lambda h: h.number)
+            if not halls:
+                return
+            for hall in halls:
+                hall_title = f"Зал {hall.number}"
+                if hall.name:
+                    hall_title += f" — {hall.name}"
+                hall_item = QTreeWidgetItem([hall_title])
+                hall_item.setData(0, Qt.UserRole, {"type": "hall", "hall": hall.number})
+                hall_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.tree.addTopLevelItem(hall_item)
+                self.tree.setFirstColumnSpanned(hall_item, 0, True)
+                hall_item.setExpanded(True)
+
+                if hall.audio_settings:
+                    self._add_track_item(hall_item, hall, hall.audio_settings, True, None)
+
+                for track_id, info in sorted(hall.zone_audio_tracks.items()):
+                    self._add_track_item(hall_item, hall, info, False, track_id)
+        finally:
+            self._updating = False
+
+    def _add_track_item(self, parent_item, hall, info, is_hall_track, track_id):
+        if not isinstance(info, dict):
+            return
+        item = QTreeWidgetItem(parent_item)
+        title = f"Зал {hall.number}: основной трек" if is_hall_track else f"Зона {track_id}"
+        item.setText(0, title)
+        item.setText(1, str(info.get('filename', '') or ''))
+        item.setText(2, str(info.get('display_name', '') or ''))
+        item.setText(3, "")
+        item.setText(4, "")
+        item.setText(5, "")
+        item.setText(6, str(hall.number))
+
+        extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
+        extras_text = ", ".join(str(x) for x in extras)
+        item.setText(7, extras_text)
+
+        item.setCheckState(3, Qt.Checked if info.get('play_once') else Qt.Unchecked)
+        item.setCheckState(4, Qt.Checked if info.get('reset') else Qt.Unchecked)
+        item.setCheckState(5, Qt.Checked if info.get('interruptible', True) else Qt.Unchecked)
+
+        payload = {
+            "type": "track",
+            "hall": hall.number,
+            "is_hall_track": is_hall_track
+        }
+        if not is_hall_track:
+            payload["track_id"] = track_id
+        item.setData(0, Qt.UserRole, payload)
+        item.setData(6, Qt.UserRole, hall.number)
+
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable | Qt.ItemIsUserCheckable
+        item.setFlags(flags)
+
+    def _resolve_track(self, payload):
+        hall_number = payload.get("hall")
+        hall = next((h for h in self.mainwindow.halls if h.number == hall_number), None)
+        if hall is None:
+            return None, None, None
+        if payload.get("is_hall_track"):
+            return hall, hall.audio_settings, None
+        track_id = payload.get("track_id")
+        return hall, hall.zone_audio_tracks.get(track_id), track_id
+
+    def _ensure_snapshot(self):
+        if self._pending_snapshot is None:
+            self._pending_snapshot = self.mainwindow.capture_state()
+
+    def _commit_snapshot(self):
+        if self._pending_snapshot is None:
+            return
+        self.mainwindow.push_undo_state(self._pending_snapshot)
+        self._pending_snapshot = None
+
+    def _on_item_changed(self, item, column):
+        if self._updating:
+            return
+        payload = item.data(0, Qt.UserRole)
+        if not isinstance(payload, dict) or payload.get("type") != "track":
+            return
+
+        if column == 1:
+            changed = self._handle_filename_change(payload, item.text(1))
+        elif column == 2:
+            changed = self._handle_display_name_change(payload, item.text(2))
+        elif column == 3:
+            changed = self._handle_flag_change(payload, 'play_once', item.checkState(3), False)
+        elif column == 4:
+            changed = self._handle_flag_change(payload, 'reset', item.checkState(4), False)
+        elif column == 5:
+            changed = self._handle_flag_change(payload, 'interruptible', item.checkState(5), True)
+        elif column == 6:
+            changed = self._handle_hall_number_change(payload, item.text(6))
+        elif column == 7:
+            changed = self._handle_extra_ids_change(payload, item.text(7))
+        else:
+            changed = False
+
+        self.refresh()
+        if changed:
+            self._commit_snapshot()
+        else:
+            self._pending_snapshot = None
+
+    def _handle_filename_change(self, payload, new_value):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_name = (new_value or "").strip()
+        current = info.get('filename', '') or ''
+        if not new_name:
+            QMessageBox.warning(self, "Ошибка", "Название аудиофайла не может быть пустым.")
+            return False
+        if new_name == current:
+            return False
+        self._ensure_snapshot()
+        info['filename'] = new_name
+        return True
+
+    def _handle_display_name_change(self, payload, new_value):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_name = (new_value or "").strip()
+        current = info.get('display_name', '') or ''
+        if new_name == current:
+            return False
+        self._ensure_snapshot()
+        if new_name:
+            info['display_name'] = new_name
+        elif 'display_name' in info:
+            info.pop('display_name', None)
+        return True
+
+    def _handle_flag_change(self, payload, key, state, default):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_value = state == Qt.Checked
+        current_value = info.get(key, default)
+        if bool(current_value) == new_value and (key in info or new_value == default):
+            return False
+        self._ensure_snapshot()
+        info[key] = new_value
+        return True
+
+    def _handle_hall_number_change(self, payload, value):
+        hall, info, track_id = self._resolve_track(payload)
+        if hall is None or info is None:
+            return False
+        try:
+            new_hall_number = int(str(value).strip())
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "Ошибка", "Номер зала должен быть числом.")
+            return False
+        if new_hall_number == hall.number:
+            return False
+        target = next((h for h in self.mainwindow.halls if h.number == new_hall_number), None)
+        if target is None:
+            QMessageBox.warning(self, "Ошибка", f"Зал с номером {new_hall_number} не найден.")
+            return False
+        self._ensure_snapshot()
+        if payload.get('is_hall_track'):
+            hall.audio_settings = None
+            target.audio_settings = info
+        else:
+            hall.zone_audio_tracks.pop(track_id, None)
+            target.zone_audio_tracks[track_id] = info
+        return True
+
+    def _handle_extra_ids_change(self, payload, text):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        parsed = parse_additional_ids(text or "")
+        current = info.get('extra_ids', [])
+        if parsed == current:
+            return False
+        self._ensure_snapshot()
+        info['extra_ids'] = parsed
+        return True
 
 # ---------------------------------------------------------------------------
 # Universal parameter dialog
@@ -1482,11 +1726,52 @@ class PlanEditorMainWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.objects_dock = dock
 
+        self.tracks_panel = TracksListWidget(self)
+
+        tracks_container = QWidget()
+        tracks_container.setObjectName("tracksDockContainer")
+        tracks_layout = QVBoxLayout(tracks_container)
+        tracks_layout.setContentsMargins(margin, margin, margin, margin)
+
+        tracks_frame = QWidget()
+        tracks_frame.setObjectName("tracksDockFrame")
+        tracks_frame_layout = QVBoxLayout(tracks_frame)
+        tracks_frame_layout.setContentsMargins(0, 0, 0, 0)
+        tracks_frame_layout.addWidget(self.tracks_panel)
+
+        tracks_container.setStyleSheet(
+            """
+            QWidget#tracksDockContainer {
+                background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#tracksDockFrame {
+                border: none;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#tracksDockFrame > * {
+                background-color: transparent;
+            }
+            QTreeWidget {
+                background-color: transparent;
+            }
+            """
+        )
+        tracks_layout.addWidget(tracks_frame)
+
+        tracks_dock = QDockWidget("Список треков", self)
+        tracks_dock.setWidget(tracks_container)
+        tracks_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.addDockWidget(Qt.RightDockWidgetArea, tracks_dock)
+        tracks_dock.hide()
+        self.tracks_dock = tracks_dock
+
         self._create_actions()
         self._create_menus()
         self._create_toolbars()
 
         self.objects_dock.visibilityChanged.connect(self._on_objects_dock_visibility_changed)
+        self.tracks_dock.visibilityChanged.connect(self._on_tracks_dock_visibility_changed)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1507,6 +1792,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
+        self.populate_tracks_table()
 
     def _apply_app_icon(self):
         icon_path = os.path.join(self._icons_dir, "app.png")
@@ -1630,6 +1916,11 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_toggle_objects_dock.setChecked(True)
         self.action_toggle_objects_dock.toggled.connect(self._toggle_objects_dock)
 
+        self.action_toggle_tracks_dock = QAction("Окно \"Список треков\"", self)
+        self.action_toggle_tracks_dock.setCheckable(True)
+        self.action_toggle_tracks_dock.setChecked(False)
+        self.action_toggle_tracks_dock.toggled.connect(self._toggle_tracks_dock)
+
     def _create_menus(self):
         menu_bar = self.menuBar()
 
@@ -1658,6 +1949,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         view_menu = menu_bar.addMenu("Вид")
         view_menu.addAction(self.action_toggle_objects_dock)
+        view_menu.addAction(self.action_toggle_tracks_dock)
 
         help_menu = menu_bar.addMenu("Справка")
         help_menu.addAction(self.action_help)
@@ -1761,6 +2053,18 @@ class PlanEditorMainWindow(QMainWindow):
             if toolbar.layout():
                 toolbar.layout().setSpacing(8)
             toolbar.setStyleSheet(toolbar_stylesheet)
+
+    def _toggle_tracks_dock(self, visible: bool):
+        if getattr(self, "tracks_dock", None) is None:
+            return
+        self.tracks_dock.setVisible(visible)
+
+    def _on_tracks_dock_visibility_changed(self, visible: bool):
+        if getattr(self, "action_toggle_tracks_dock", None) is None:
+            return
+        self.action_toggle_tracks_dock.blockSignals(True)
+        self.action_toggle_tracks_dock.setChecked(visible)
+        self.action_toggle_tracks_dock.blockSignals(False)
 
     def _load_readme_text(self) -> str | None:
         if self._cached_readme_text is not None:
@@ -2198,6 +2502,12 @@ class PlanEditorMainWindow(QMainWindow):
         else:
             super().keyPressEvent(event)
 
+    def populate_tracks_table(self):
+        panel = getattr(self, "tracks_panel", None)
+        if panel is None:
+            return
+        panel.refresh()
+
     def populate_tree(self):
         self.last_selected_items = []
         self.tree.clear()
@@ -2249,6 +2559,8 @@ class PlanEditorMainWindow(QMainWindow):
                 for z in zlist: z.tree_item = zi
 
             hi.setExpanded(True)
+
+        self.populate_tracks_table()
 
     def set_mode(self, mode):
         if not self.grid_calibrated and mode!="calibrate":
@@ -2560,6 +2872,9 @@ class PlanEditorMainWindow(QMainWindow):
             "reset": bool(track.get("reset", False)),
             "play_once": bool(track.get("play_once", False))
         }
+        name_value = track.get("name")
+        if isinstance(name_value, str) and name_value.strip():
+            info["display_name"] = name_value.strip()
         if track.get("audio2"):
             sec_size = 0
             if isinstance(file_sizes, dict) and track["audio2"] in file_sizes:
