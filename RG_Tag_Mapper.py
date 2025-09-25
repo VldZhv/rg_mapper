@@ -1412,9 +1412,19 @@ class PlanEditorMainWindow(QMainWindow):
         self.view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
 
         central_widget = QWidget()
+        central_widget.setObjectName("centralContainer")
         central_layout = QVBoxLayout(central_widget)
-        margin = 16
+        margin = 8
         central_layout.setContentsMargins(margin, margin, margin, margin)
+        central_widget.setStyleSheet(
+            """
+            QWidget#centralContainer {
+                border: 2px solid #a0a0a0;
+                border-radius: 6px;
+                background-color: rgba(255, 255, 255, 25);
+            }
+            """
+        )
         central_layout.addWidget(self.view)
         self.setCentralWidget(central_widget)
 
@@ -1424,8 +1434,18 @@ class PlanEditorMainWindow(QMainWindow):
         self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
         dock_container = QWidget()
+        dock_container.setObjectName("dockContainer")
         dock_layout = QVBoxLayout(dock_container)
         dock_layout.setContentsMargins(margin, margin, margin, margin)
+        dock_container.setStyleSheet(
+            """
+            QWidget#dockContainer {
+                border: 2px solid #a0a0a0;
+                border-radius: 6px;
+                background-color: rgba(255, 255, 255, 25);
+            }
+            """
+        )
         dock_layout.addWidget(self.tree)
 
         dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
