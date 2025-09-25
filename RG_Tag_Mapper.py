@@ -2074,6 +2074,20 @@ class PlanEditorMainWindow(QMainWindow):
     def perform_calibration(self):
         if not self.scene.pixmap:
             QMessageBox.warning(self, "Ошибка", "Сначала загрузите изображение!"); return
+        confirm_text = (
+            "Для калибровки  координатной сетки необходимо будет указать на плане 2 точки, "
+            "обозначив отрезок известной длины. После этого задать реальную длину отрезка в см. "
+            "Продолжить?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Калибровка",
+            confirm_text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
         self.set_mode("calibrate")
         self.statusBar().showMessage("Укажите 2 точки на плане для обозначения отрезка известной длины")
     def resnap_objects(self):
