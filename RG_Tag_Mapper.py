@@ -1588,7 +1588,12 @@ class PlanEditorMainWindow(QMainWindow):
         help_menu.addAction(self.action_about)
 
     def _create_toolbars(self):
-        icon_size = QSize(48, 48)
+        base_icon_size = QSize(48, 48)
+        scale_factor = 1.2
+        icon_size = QSize(
+            int(round(base_icon_size.width() * scale_factor)),
+            int(round(base_icon_size.height() * scale_factor)),
+        )
 
         file_toolbar = QToolBar("Файл", self)
         file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
