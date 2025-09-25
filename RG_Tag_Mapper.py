@@ -310,7 +310,10 @@ class TracksListWidget(QWidget):
         self._updating = True
         try:
             self.tree.clear()
-            halls = sorted(self.mainwindow.halls, key=lambda h: h.number)
+            halls = sorted(
+                self.mainwindow.halls,
+                key=lambda h: self._normalize_sort_key(getattr(h, "number", 0))
+            )
             if not halls:
                 return
             for hall in halls:
@@ -327,10 +330,27 @@ class TracksListWidget(QWidget):
                 if hall.audio_settings:
                     self._add_track_item(hall_item, hall, hall.audio_settings, True, None)
 
-                for track_id, info in sorted(hall.zone_audio_tracks.items()):
+                for track_id, info in self._sorted_track_items(hall.zone_audio_tracks):
                     self._add_track_item(hall_item, hall, info, False, track_id)
         finally:
             self._updating = False
+
+    @staticmethod
+    def _normalize_sort_key(value):
+        try:
+            return 0, int(value)
+        except (TypeError, ValueError):
+            return 1, str(value)
+
+    def _sorted_track_items(self, track_map):
+        if not track_map:
+            return []
+        try:
+            items = list(track_map.items())
+        except AttributeError:
+            return []
+        items.sort(key=lambda item: self._normalize_sort_key(item[0]))
+        return items
 
     def _add_track_item(self, parent_item, hall, info, is_hall_track, track_id):
         if not isinstance(info, dict):
