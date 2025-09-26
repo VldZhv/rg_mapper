@@ -3252,7 +3252,7 @@ class PlanEditorMainWindow(QMainWindow):
         form_layout.addRow("Логин:", login_edit)
 
         target_dir_edit = QLineEdit(dialog)
-        target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается автоматически)")
+        target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
         port_spin = QSpinBox(dialog)
@@ -3375,7 +3375,14 @@ class PlanEditorMainWindow(QMainWindow):
             if remote_dir_effective and remote_dir_effective not in (".", "./"):
                 try:
                     if remote_dir_effective.startswith("~"):
-                        remote_dir_effective = sftp.normalize(remote_dir_effective)
+                        try:
+                            home_dir = sftp.normalize(".")
+                        except IOError:
+                            home_dir = sftp.normalize("~")
+                        subpath = remote_dir_effective[1:].lstrip("/")
+                        remote_dir_effective = (
+                            posixpath.join(home_dir, subpath) if subpath else home_dir
+                        )
                     sftp.listdir(remote_dir_effective)
                 except IOError as exc:
                     raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
