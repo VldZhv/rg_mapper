@@ -1956,6 +1956,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_save.triggered.connect(self.save_project)
 
         self.action_save_as = QAction(
+            load_icon("save.png", QStyle.SP_DialogSaveButton),
             "Сохранить проект как…",
             self,
         )
@@ -1969,6 +1970,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_load.triggered.connect(self.load_project)
 
         self.action_project_properties = QAction(
+            self.style().standardIcon(QStyle.SP_FileDialogInfoView),
             "Свойства проекта",
             self,
         )
@@ -1989,7 +1991,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_export.triggered.connect(self.show_export_menu)
 
         self.action_upload = QAction(
-            load_icon("upload.png", QStyle.SP_ArrowUp),
+            load_icon("server.png", QStyle.SP_ArrowUp),
             "Выгрузить на сервер",
             self,
         )
