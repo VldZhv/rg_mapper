@@ -17,6 +17,35 @@ from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTi
 from datetime import datetime
 from mutagen.mp3 import MP3
 
+
+def find_default_ssh_key(base_dir: str) -> str | None:
+    try:
+        entries = os.listdir(base_dir)
+    except OSError:
+        return None
+
+    preferred_names = {
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_ecdsa_sk",
+        "id_ed25519_sk",
+    }
+    for name in preferred_names:
+        path = os.path.join(base_dir, name)
+        if os.path.isfile(path):
+            return path
+
+    allowed_suffixes = (".pem", ".key", ".rsa", ".ppk")
+    for entry in sorted(entries):
+        if entry.lower().endswith(allowed_suffixes):
+            path = os.path.join(base_dir, entry)
+            if os.path.isfile(path):
+                return path
+
+    return None
+
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
 
@@ -3347,8 +3376,10 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout = QHBoxLayout(key_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("~/.ssh/id_rsa")
-        key_path_edit.setText(os.path.expanduser("~/headphones/id_rsa"))
+        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
+        default_key_path = find_default_ssh_key(os.getcwd())
+        if default_key_path:
+            key_path_edit.setText(default_key_path)
         key_layout.addWidget(key_path_edit)
         browse_button = QPushButton("Обзор…", key_widget)
 
