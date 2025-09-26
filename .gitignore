@@ -6,3 +6,4 @@ dist/
 *.jpg
 *.bmp
 *.pdf
+id_rsa
