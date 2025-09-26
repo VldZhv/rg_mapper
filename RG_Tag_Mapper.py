@@ -2177,7 +2177,11 @@ class PlanEditorMainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         browser = QTextBrowser(dialog)
-        browser.setPlainText(text)
+        if hasattr(browser, "setMarkdown"):
+            browser.setMarkdown(text)
+        else:
+            browser.setPlainText(text)
+        browser.setOpenExternalLinks(True)
         layout.addWidget(browser)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
