@@ -3264,16 +3264,16 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout = QHBoxLayout(key_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("/path/to/id_rsa.ppk")
+        key_path_edit.setPlaceholderText("~/.ssh/id_rsa")
         key_layout.addWidget(key_path_edit)
         browse_button = QPushButton("Обзор…", key_widget)
 
         def browse_key_file():
             filename, _ = QFileDialog.getOpenFileName(
                 self,
-                "Выберите ключ PuTTY",
-                "",
-                "PuTTY PPK (*.ppk);;Все файлы (*)",
+                "Выберите приватный ключ SSH",
+                os.path.expanduser("~/.ssh"),
+                "OpenSSH ключи (*.pem *.key *.rsa *.ssh);;Все файлы (*)",
             )
             if filename:
                 key_path_edit.setText(filename)
