@@ -291,6 +291,17 @@ class TracksListWidget(QWidget):
             QAbstractItemView.EditTrigger.SelectedClicked
         )
         self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.setStyleSheet(
+            """
+            QTreeWidget { background-color: transparent; }
+            QTreeWidget QLineEdit {
+                background-color: #ffffff;
+                color: #000000;
+                selection-background-color: palette(highlight);
+                selection-color: palette(highlighted-text);
+            }
+            """
+        )
 
         header = self.tree.header()
         header.setStretchLastSection(False)
@@ -302,7 +313,7 @@ class TracksListWidget(QWidget):
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.Fixed)
+        header.setSectionResizeMode(7, QHeaderView.Interactive)
 
         self._adjust_audio_column_width()
         self._adjust_name_column_width()
@@ -466,10 +477,10 @@ class TracksListWidget(QWidget):
         for index in range(self.tree.topLevelItemCount()):
             _iterate(self.tree.topLevelItem(index))
 
-        min_width = max(label_width, metrics.averageCharWidth() * 4)
+        base_width = max(label_width, int(metrics.averageCharWidth() * 18))
         if max_text_width:
-            min_width = max(min_width, max_text_width // 2 + 10)
-        header.resizeSection(7, min_width)
+            base_width = max(base_width, max_text_width + 20)
+        header.resizeSection(7, base_width)
 
     def _handle_filename_change(self, payload, new_value):
         hall, info, _ = self._resolve_track(payload)
