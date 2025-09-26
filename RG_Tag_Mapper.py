@@ -1702,7 +1702,10 @@ class PlanGraphicsScene(QGraphicsScene):
 class PlanEditorMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RG Tags Mapper"); self.resize(1200,800)
+        self._base_window_title = "RG Tags Mapper"
+        self.project_name = ""
+        self._update_window_title()
+        self.resize(1200, 800)
 
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
@@ -1873,6 +1876,33 @@ class PlanEditorMainWindow(QMainWindow):
         if app is not None:
             app.setWindowIcon(icon)
 
+    def _update_window_title(self):
+        title = self._base_window_title
+        name = (self.project_name or "").strip()
+        if name:
+            title = f"{title} — {name}"
+        self.setWindowTitle(title)
+
+    @staticmethod
+    def _sanitize_project_name_for_folder(name: str) -> str:
+        sanitized_chars = []
+        for ch in name:
+            if ch in ("/", "\\", ":", "*", "?", '"', "<", ">", "|"):
+                sanitized_chars.append("_")
+            elif ch.isspace():
+                sanitized_chars.append("_")
+            else:
+                sanitized_chars.append(ch)
+        sanitized = "".join(sanitized_chars).strip("_")
+        return sanitized
+
+    def _build_remote_export_folder_name(self) -> str:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M")
+        base_name = self._sanitize_project_name_for_folder((self.project_name or "").strip())
+        if base_name:
+            return f"{base_name}_{timestamp}"
+        return timestamp
+
     def _create_actions(self):
         def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
             path = os.path.join(self._icons_dir, filename)
@@ -1908,6 +1938,12 @@ class PlanEditorMainWindow(QMainWindow):
             self,
         )
         self.action_load.triggered.connect(self.load_project)
+
+        self.action_project_properties = QAction(
+            "Свойства проекта",
+            self,
+        )
+        self.action_project_properties.triggered.connect(self.edit_project_properties)
 
         self.action_import = QAction(
             load_icon("import.png", QStyle.SP_DialogOpenButton),
@@ -2006,6 +2042,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addAction(self.action_save)
         file_menu.addAction(self.action_save_as)
         file_menu.addAction(self.action_load)
+        file_menu.addAction(self.action_project_properties)
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
@@ -2269,6 +2306,7 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_zones": self.lock_zones,
             "lock_anchors": self.lock_anchors,
             "current_project_file": self.current_project_file,
+            "project_name": self.project_name,
             "halls": [],
             "anchors": []
         }
@@ -2350,6 +2388,8 @@ class PlanEditorMainWindow(QMainWindow):
             self.lock_zones = state.get("lock_zones", False)
             self.lock_anchors = state.get("lock_anchors", False)
             self.current_project_file = state.get("current_project_file")
+            name_value = state.get("project_name")
+            self.project_name = name_value.strip() if isinstance(name_value, str) else ""
             for hall_data in state.get("halls", []):
                 hall = HallItem(
                     hall_data.get("x_px", 0.0),
@@ -2399,6 +2439,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.current_hall_for_zone = None
             self.apply_lock_flags()
             self.populate_tree()
+            self._update_window_title()
             self.statusBar().clearMessage()
         finally:
             self._restoring_state = False
@@ -2740,9 +2781,39 @@ class PlanEditorMainWindow(QMainWindow):
         self.grid_calibrated = False
         self.current_project_file = None
         self._saved_state_snapshot = None
+        self.project_name = ""
+        self._update_window_title()
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
         self.push_undo_state(prev_state)
+
+    def edit_project_properties(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Свойства проекта")
+        form_layout = QFormLayout(dialog)
+
+        name_edit = QLineEdit(dialog)
+        name_edit.setText(self.project_name)
+        name_edit.setPlaceholderText("Введите имя проекта")
+        form_layout.addRow("Имя проекта:", name_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form_layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        new_name = name_edit.text().strip()
+        if new_name == self.project_name:
+            return
+
+        prev_state = self.capture_state()
+        self.project_name = new_name
+        self._update_window_title()
+        self.push_undo_state(prev_state)
+        self.statusBar().showMessage("Имя проекта обновлено.", 5000)
 
     def _collect_project_data(self):
         buf_data = ""
@@ -2758,6 +2829,7 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_halls": self.lock_halls,
             "lock_zones": self.lock_zones,
             "lock_anchors": self.lock_anchors,
+            "project_name": self.project_name,
             "halls": [], "anchors": []
         }
         for h in self.halls:
@@ -3171,6 +3243,8 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_zones   = data.get("lock_zones",False)
         self.lock_anchors = data.get("lock_anchors",False)
         self.grid_calibrated = True
+        project_name_value = data.get("project_name")
+        self.project_name = project_name_value.strip() if isinstance(project_name_value, str) else ""
         for hd in data.get("halls",[]):
             h = HallItem(
                 hd.get("x_px",0), hd.get("y_px",0),
@@ -3204,6 +3278,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.scene.addItem(a); self.anchors.append(a)
         self.apply_lock_flags(); self.populate_tree()
         self.current_project_file = fp
+        self._update_window_title()
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
         self.push_undo_state(prev_state)
@@ -3360,6 +3435,8 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
         rooms_bytes = rooms_json_text.encode("utf-8")
         tracks_bytes = tracks_json_text.encode("utf-8")
+        export_folder_name = None
+        normalized_target_directory = None
 
         try:
             ssh = paramiko.SSHClient()
@@ -3390,11 +3467,32 @@ class PlanEditorMainWindow(QMainWindow):
                     sftp.listdir(remote_dir_effective)
                 except IOError as exc:
                     raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
-                rooms_remote_path = posixpath.join(remote_dir_effective, "rooms.json")
-                tracks_remote_path = posixpath.join(remote_dir_effective, "tracks.json")
+                try:
+                    base_dir = sftp.normalize(remote_dir_effective)
+                except IOError:
+                    base_dir = remote_dir_effective
             else:
-                rooms_remote_path = "rooms.json"
-                tracks_remote_path = "tracks.json"
+                try:
+                    base_dir = sftp.normalize(".")
+                except IOError:
+                    base_dir = "."
+
+            export_folder_name = self._build_remote_export_folder_name()
+            target_directory = posixpath.join(base_dir, export_folder_name)
+            try:
+                sftp.mkdir(target_directory)
+            except IOError as exc:
+                raise IOError(
+                    f"Не удалось создать каталог {export_folder_name}: {exc}"
+                ) from exc
+
+            try:
+                normalized_target_directory = sftp.normalize(target_directory)
+            except IOError:
+                normalized_target_directory = target_directory
+
+            rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
+            tracks_remote_path = posixpath.join(normalized_target_directory, "tracks.json")
 
             with sftp.file(rooms_remote_path, "wb") as remote_rooms:
                 remote_rooms.write(rooms_bytes)
@@ -3423,8 +3521,22 @@ class PlanEditorMainWindow(QMainWindow):
                 except Exception:
                     pass
 
-        self.statusBar().showMessage("Конфигурация выгружена на сервер.", 7000)
-        QMessageBox.information(self, "Выгрузка на сервер", "Конфигурация успешно передана на сервер.")
+        if normalized_target_directory:
+            status_suffix = f" в каталог {normalized_target_directory}"
+        elif export_folder_name:
+            status_suffix = f" в каталог {export_folder_name}"
+        else:
+            status_suffix = ""
+        self.statusBar().showMessage(
+            f"Конфигурация выгружена на сервер{status_suffix}.",
+            7000,
+        )
+        message_text = "Конфигурация успешно передана на сервер."
+        if normalized_target_directory:
+            message_text += f" Файлы сохранены в каталоге {normalized_target_directory}."
+        elif export_folder_name:
+            message_text += f" Файлы сохранены в каталоге {export_folder_name}."
+        QMessageBox.information(self, "Выгрузка на сервер", message_text)
 
     def _prepare_export_payload(self) -> tuple[str, dict]:
         config = {"rooms": []}
