@@ -3252,7 +3252,7 @@ class PlanEditorMainWindow(QMainWindow):
         form_layout.addRow("Логин:", login_edit)
 
         target_dir_edit = QLineEdit(dialog)
-        target_dir_edit.setPlaceholderText("~/rg_mapper")
+        target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается автоматически)")
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
         port_spin = QSpinBox(dialog)
@@ -3371,13 +3371,16 @@ class PlanEditorMainWindow(QMainWindow):
             sftp = ssh.open_sftp()
 
             remote_dir_clean = remote_dir.replace("\\", "/").strip()
-            if remote_dir_clean and remote_dir_clean not in (".", "./"):
+            remote_dir_effective = remote_dir_clean
+            if remote_dir_effective and remote_dir_effective not in (".", "./"):
                 try:
-                    sftp.listdir(remote_dir_clean)
+                    if remote_dir_effective.startswith("~"):
+                        remote_dir_effective = sftp.normalize(remote_dir_effective)
+                    sftp.listdir(remote_dir_effective)
                 except IOError as exc:
                     raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
-                rooms_remote_path = posixpath.join(remote_dir_clean, "rooms.json")
-                tracks_remote_path = posixpath.join(remote_dir_clean, "tracks.json")
+                rooms_remote_path = posixpath.join(remote_dir_effective, "rooms.json")
+                tracks_remote_path = posixpath.join(remote_dir_effective, "tracks.json")
             else:
                 rooms_remote_path = "rooms.json"
                 tracks_remote_path = "tracks.json"
