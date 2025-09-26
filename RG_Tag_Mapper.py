@@ -6,11 +6,11 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox, QStyle, QTextBrowser
+    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
-    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon
+    QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon, QPalette
 )
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
@@ -47,12 +47,17 @@ def load_audio_file_info(path: str):
     except Exception as exc:
         raise ValueError(str(exc)) from exc
     duration_ms = int(round(audio.info.length * 1000)) if audio.info.length else 0
+    try:
+        size_bytes = os.path.getsize(path)
+    except OSError:
+        size_bytes = 0
     with open(path, 'rb') as fh:
         encoded = base64.b64encode(fh.read()).decode('ascii')
     return {
         'filename': os.path.basename(path),
         'data': encoded,
-        'duration_ms': duration_ms
+        'duration_ms': duration_ms,
+        'size': size_bytes
     }
 
 
@@ -74,6 +79,7 @@ class AudioTrackWidget(QWidget):
         super().__init__(parent)
         self.main_file_info = None
         self.secondary_file_info = None
+        self.display_name = ""
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -148,15 +154,18 @@ class AudioTrackWidget(QWidget):
         self.main_file_info = {
             'filename': data.get('filename'),
             'data': data.get('data'),
-            'duration_ms': data.get('duration_ms', 0)
+            'duration_ms': data.get('duration_ms', 0),
+            'size': data.get('size', 0)
         }
+        self.display_name = data.get('display_name', "") if isinstance(data, dict) else ""
         self.secondary_file_info = None
         if data.get('secondary'):
             sec = data['secondary']
             self.secondary_file_info = {
                 'filename': sec.get('filename'),
                 'data': sec.get('data'),
-                'duration_ms': sec.get('duration_ms', 0)
+                'duration_ms': sec.get('duration_ms', 0),
+                'size': sec.get('size', 0)
             }
         self.extra_ids_edit.setText(', '.join(str(x) for x in data.get('extra_ids', [])))
         self.interruptible_box.setChecked(data.get('interruptible', True))
@@ -171,16 +180,21 @@ class AudioTrackWidget(QWidget):
             'filename': self.main_file_info['filename'],
             'data': self.main_file_info['data'],
             'duration_ms': self.main_file_info.get('duration_ms', 0),
+            'size': self.main_file_info.get('size', 0),
             'extra_ids': parse_additional_ids(self.extra_ids_edit.text()),
             'interruptible': self.interruptible_box.isChecked(),
             'reset': self.reset_box.isChecked(),
             'play_once': self.play_once_box.isChecked()
         }
+        name_text = (self.display_name or "").strip()
+        if name_text:
+            result['display_name'] = name_text
         if self.secondary_file_info:
             result['secondary'] = {
                 'filename': self.secondary_file_info['filename'],
                 'data': self.secondary_file_info['data'],
-                'duration_ms': self.secondary_file_info.get('duration_ms', 0)
+                'duration_ms': self.secondary_file_info.get('duration_ms', 0),
+                'size': self.secondary_file_info.get('size', 0)
             }
         return result
 
@@ -194,6 +208,7 @@ class AudioTrackWidget(QWidget):
             QMessageBox.warning(self, "Ошибка", f"Не удалось загрузить аудио:\n{err}")
             return
         self.main_file_info = info
+        self.display_name = ""
         if not self.interruptible_box.isChecked():
             self.interruptible_box.setChecked(True)
         self._update_state()
@@ -213,6 +228,7 @@ class AudioTrackWidget(QWidget):
     def _clear_main_file(self):
         self.main_file_info = None
         self.secondary_file_info = None
+        self.display_name = ""
         self.extra_ids_edit.clear()
         self.interruptible_box.setChecked(True)
         self.reset_box.setChecked(False)
@@ -240,6 +256,309 @@ class AudioTrackWidget(QWidget):
             self.secondary_label.setText(self.secondary_file_info.get('filename', ''))
         else:
             self.secondary_label.setText("Не выбран")
+
+# ---------------------------------------------------------------------------
+# Track list dock
+# ---------------------------------------------------------------------------
+class TracksListWidget(QWidget):
+    HEADER_LABELS = [
+        "Зал / Трек",
+        "Аудиофайл",
+        "Играть единожды",
+        "Сброс",
+        "Прерываемый",
+        "Номер зала",
+        "Доп. ID",
+        "Имя",
+    ]
+
+    def __init__(self, mainwindow):
+        super().__init__(mainwindow)
+        self.mainwindow = mainwindow
+        self._updating = False
+        self._pending_snapshot = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        self.tree = QTreeWidget(self)
+        self.tree.setColumnCount(len(self.HEADER_LABELS))
+        self.tree.setHeaderLabels(self.HEADER_LABELS)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setRootIsDecorated(True)
+        self.tree.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked |
+            QAbstractItemView.EditTrigger.SelectedClicked
+        )
+        self.tree.itemChanged.connect(self._on_item_changed)
+        self.tree.setStyleSheet(
+            """
+            QTreeWidget { background-color: transparent; }
+            QTreeWidget QLineEdit {
+                background-color: #ffffff;
+                color: #000000;
+                selection-background-color: palette(highlight);
+                selection-color: palette(highlighted-text);
+            }
+            """
+        )
+
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setMinimumSectionSize(24)
+        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(7, QHeaderView.Interactive)
+
+        self._adjust_audio_column_width()
+        self._adjust_name_column_width()
+
+        layout.addWidget(self.tree)
+
+    def refresh(self):
+        if not hasattr(self.mainwindow, "halls"):
+            return
+        self._updating = True
+        try:
+            self.tree.clear()
+            halls = sorted(
+                self.mainwindow.halls,
+                key=lambda h: self._normalize_sort_key(getattr(h, "number", 0))
+            )
+            if not halls:
+                return
+            for hall in halls:
+                hall_title = f"Зал {hall.number}"
+                if hall.name:
+                    hall_title += f" — {hall.name}"
+                hall_item = QTreeWidgetItem([hall_title])
+                hall_item.setData(0, Qt.UserRole, {"type": "hall", "hall": hall.number})
+                hall_item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.tree.addTopLevelItem(hall_item)
+                hall_item.setFirstColumnSpanned(True)
+                hall_item.setExpanded(True)
+
+                if hall.audio_settings:
+                    self._add_track_item(hall_item, hall, hall.audio_settings, True, None)
+
+                for track_id, info in self._sorted_track_items(hall.zone_audio_tracks):
+                    self._add_track_item(hall_item, hall, info, False, track_id)
+        finally:
+            self._updating = False
+        self._adjust_name_column_width()
+
+    @staticmethod
+    def _normalize_sort_key(value):
+        try:
+            return 0, int(value)
+        except (TypeError, ValueError):
+            return 1, str(value)
+
+    def _sorted_track_items(self, track_map):
+        if not track_map:
+            return []
+        try:
+            items = list(track_map.items())
+        except AttributeError:
+            return []
+        items.sort(key=lambda item: self._normalize_sort_key(item[0]))
+        return items
+
+    def _add_track_item(self, parent_item, hall, info, is_hall_track, track_id):
+        if not isinstance(info, dict):
+            return
+        item = QTreeWidgetItem(parent_item)
+        title = f"Зал {hall.number}: основной трек" if is_hall_track else f"Зона {track_id}"
+        item.setText(0, title)
+        item.setText(1, str(info.get('filename', '') or ''))
+        item.setText(2, "")
+        item.setText(3, "")
+        item.setText(4, "")
+        item.setText(5, str(hall.number))
+        item.setText(6, "")
+        item.setText(7, str(info.get('display_name', '') or ''))
+
+        extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
+        extras_text = ", ".join(str(x) for x in extras)
+        item.setText(6, extras_text)
+
+        item.setCheckState(2, Qt.Checked if info.get('play_once') else Qt.Unchecked)
+        item.setCheckState(3, Qt.Checked if info.get('reset') else Qt.Unchecked)
+        item.setCheckState(4, Qt.Checked if info.get('interruptible', True) else Qt.Unchecked)
+
+        payload = {
+            "type": "track",
+            "hall": hall.number,
+            "is_hall_track": is_hall_track
+        }
+        if not is_hall_track:
+            payload["track_id"] = track_id
+        item.setData(0, Qt.UserRole, payload)
+        item.setData(5, Qt.UserRole, hall.number)
+
+        flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable | Qt.ItemIsUserCheckable
+        item.setFlags(flags)
+
+    def _resolve_track(self, payload):
+        hall_number = payload.get("hall")
+        hall = next((h for h in self.mainwindow.halls if h.number == hall_number), None)
+        if hall is None:
+            return None, None, None
+        if payload.get("is_hall_track"):
+            return hall, hall.audio_settings, None
+        track_id = payload.get("track_id")
+        return hall, hall.zone_audio_tracks.get(track_id), track_id
+
+    def _ensure_snapshot(self):
+        if self._pending_snapshot is None:
+            self._pending_snapshot = self.mainwindow.capture_state()
+
+    def _commit_snapshot(self):
+        if self._pending_snapshot is None:
+            return
+        self.mainwindow.push_undo_state(self._pending_snapshot)
+        self._pending_snapshot = None
+
+    def _on_item_changed(self, item, column):
+        if self._updating:
+            return
+        payload = item.data(0, Qt.UserRole)
+        if not isinstance(payload, dict) or payload.get("type") != "track":
+            return
+
+        if column == 1:
+            changed = self._handle_filename_change(payload, item.text(1))
+        elif column == 2:
+            changed = self._handle_flag_change(payload, 'play_once', item.checkState(2), False)
+        elif column == 3:
+            changed = self._handle_flag_change(payload, 'reset', item.checkState(3), False)
+        elif column == 4:
+            changed = self._handle_flag_change(payload, 'interruptible', item.checkState(4), True)
+        elif column == 5:
+            changed = self._handle_hall_number_change(payload, item.text(5))
+        elif column == 6:
+            changed = self._handle_extra_ids_change(payload, item.text(6))
+        elif column == 7:
+            changed = self._handle_display_name_change(payload, item.text(7))
+        else:
+            changed = False
+
+        self.refresh()
+        if changed:
+            self._commit_snapshot()
+        else:
+            self._pending_snapshot = None
+
+    def _adjust_audio_column_width(self):
+        header = self.tree.header()
+        metrics = header.fontMetrics()
+        label = self.HEADER_LABELS[1]
+        width = metrics.horizontalAdvance(label) + 20
+        header.resizeSection(1, width)
+
+    def _adjust_name_column_width(self):
+        header = self.tree.header()
+        metrics = header.fontMetrics()
+        label_width = metrics.horizontalAdvance(self.HEADER_LABELS[-1]) + 20
+
+        max_text_width = 0
+
+        def _iterate(item):
+            nonlocal max_text_width
+            max_text_width = max(max_text_width, metrics.horizontalAdvance(item.text(7)))
+            for idx in range(item.childCount()):
+                _iterate(item.child(idx))
+
+        for index in range(self.tree.topLevelItemCount()):
+            _iterate(self.tree.topLevelItem(index))
+
+        base_width = max(label_width, int(metrics.averageCharWidth() * 18))
+        if max_text_width:
+            base_width = max(base_width, max_text_width + 20)
+        header.resizeSection(7, base_width)
+
+    def _handle_filename_change(self, payload, new_value):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_name = (new_value or "").strip()
+        current = info.get('filename', '') or ''
+        if not new_name:
+            QMessageBox.warning(self, "Ошибка", "Название аудиофайла не может быть пустым.")
+            return False
+        if new_name == current:
+            return False
+        self._ensure_snapshot()
+        info['filename'] = new_name
+        return True
+
+    def _handle_display_name_change(self, payload, new_value):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_name = (new_value or "").strip()
+        current = info.get('display_name', '') or ''
+        if new_name == current:
+            return False
+        self._ensure_snapshot()
+        if new_name:
+            info['display_name'] = new_name
+        elif 'display_name' in info:
+            info.pop('display_name', None)
+        return True
+
+    def _handle_flag_change(self, payload, key, state, default):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        new_value = state == Qt.Checked
+        current_value = info.get(key, default)
+        if bool(current_value) == new_value and (key in info or new_value == default):
+            return False
+        self._ensure_snapshot()
+        info[key] = new_value
+        return True
+
+    def _handle_hall_number_change(self, payload, value):
+        hall, info, track_id = self._resolve_track(payload)
+        if hall is None or info is None:
+            return False
+        try:
+            new_hall_number = int(str(value).strip())
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "Ошибка", "Номер зала должен быть числом.")
+            return False
+        if new_hall_number == hall.number:
+            return False
+        target = next((h for h in self.mainwindow.halls if h.number == new_hall_number), None)
+        if target is None:
+            QMessageBox.warning(self, "Ошибка", f"Зал с номером {new_hall_number} не найден.")
+            return False
+        self._ensure_snapshot()
+        if payload.get('is_hall_track'):
+            hall.audio_settings = None
+            target.audio_settings = info
+        else:
+            hall.zone_audio_tracks.pop(track_id, None)
+            target.zone_audio_tracks[track_id] = info
+        return True
+
+    def _handle_extra_ids_change(self, payload, text):
+        hall, info, _ = self._resolve_track(payload)
+        if info is None:
+            return False
+        parsed = parse_additional_ids(text or "")
+        current = info.get('extra_ids', [])
+        if parsed == current:
+            return False
+        self._ensure_snapshot()
+        info['extra_ids'] = parsed
+        return True
 
 # ---------------------------------------------------------------------------
 # Universal parameter dialog
@@ -473,8 +792,13 @@ class ZoneEditDialog(QDialog):
         self.angle_spin.setValue(int(data['angle']))
         form.addRow("Угол поворота (°)", self.angle_spin)
 
+        self._stored_audio_data = copy.deepcopy(audio_data) if audio_data else None
         self.audio_widget = AudioTrackWidget(self, audio_data)
         layout.addWidget(self.audio_widget)
+
+        self._audio_controls_enabled = False
+        self.type_combo.currentTextChanged.connect(self._on_type_changed)
+        self._on_type_changed(self.type_combo.currentText())
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
@@ -483,6 +807,12 @@ class ZoneEditDialog(QDialog):
 
     def values(self):
         full_type = {"Входная": "Входная зона", "Выходная": "Выходная зона", "Переходная": "Переходная"}[self.type_combo.currentText()]
+        audio_data = self.audio_widget.get_data() if self._audio_controls_enabled else self._stored_audio_data
+        if audio_data:
+            audio_data = copy.deepcopy(audio_data)
+            self._stored_audio_data = copy.deepcopy(audio_data)
+        else:
+            self._stored_audio_data = None
         return {
             'zone_num': self.num_spin.value(),
             'zone_type': full_type,
@@ -491,8 +821,26 @@ class ZoneEditDialog(QDialog):
             'w': self.w_spin.value(),
             'h': self.h_spin.value(),
             'angle': self.angle_spin.value(),
-            'audio': self.audio_widget.get_data()
+            'audio': audio_data
         }
+
+    def _on_type_changed(self, text: str):
+        is_entry_zone = text == "Входная"
+        if is_entry_zone:
+            if not self._audio_controls_enabled:
+                if self._stored_audio_data:
+                    self.audio_widget.set_data(copy.deepcopy(self._stored_audio_data))
+                else:
+                    self.audio_widget.set_data(None)
+            self.audio_widget.setVisible(True)
+            self.audio_widget.setEnabled(True)
+            self._audio_controls_enabled = True
+        else:
+            if self._audio_controls_enabled:
+                self._stored_audio_data = self.audio_widget.get_data()
+            self.audio_widget.setVisible(False)
+            self.audio_widget.setEnabled(False)
+            self._audio_controls_enabled = False
 
 # ---------------------------------------------------------------------------
 # HallItem
@@ -534,9 +882,13 @@ class HallItem(QGraphicsRectItem):
                 new.setY(round(new.y()/step)*step)
             delta = new - self.pos()
             if not delta.isNull():
-                for child in self.childItems():
-                    if isinstance(child, RectZoneItem):
-                        child.moveBy(-delta.x(), -delta.y())
+                scene = self.scene()
+                if scene:
+                    mw = getattr(scene, "mainwindow", None)
+                    if mw:
+                        for anchor in mw.anchors:
+                            if anchor.main_hall_number == self.number or self.number in anchor.extra_halls:
+                                anchor.moveBy(delta.x(), delta.y())
             return new
         return super().itemChange(change, value)
 
@@ -815,14 +1167,20 @@ class AnchorItem(QGraphicsEllipseItem):
 # ZoneItem
 # ---------------------------------------------------------------------------
 class RectZoneItem(QGraphicsRectItem):
+    _ZONE_RGB = {
+        "Входная зона": (0, 128, 0),
+        "Входная": (0, 128, 0),
+        "Выходная зона": (128, 0, 128),
+        "Выходная": (128, 0, 128),
+        "Переходная": (0, 102, 204),
+        "Переходная зона": (0, 102, 204),
+    }
+
     def __init__(self, bl, w, h, zone_num=0, zone_type="Входная зона", angle=0, parent_hall=None):
         super().__init__(0, -h, w, h, parent_hall)
         self.zone_num, self.zone_type, self.zone_angle = zone_num, zone_type, angle
         self.setTransformOriginPoint(0,0); self.setRotation(-angle); self.setPos(bl)
-        if zone_type in ("Входная зона","Переходная"):
-            self.setPen(QPen(QColor(0,128,0),2)); self.setBrush(QBrush(QColor(0,128,0,50)))
-        else:
-            self.setPen(QPen(QColor(128,0,128),2)); self.setBrush(QBrush(QColor(128,0,128,50)))
+        self._apply_zone_palette()
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
         self.update_zvalue()
@@ -834,6 +1192,16 @@ class RectZoneItem(QGraphicsRectItem):
         hall_number = hall.number if isinstance(hall, HallItem) and hasattr(hall, 'number') else 0
         zone_number = self.zone_num if isinstance(self.zone_num, (int, float)) else 0
         self.setZValue(5000.0 + float(hall_number) * 0.1 + float(zone_number) * 0.001)
+
+    def _apply_zone_palette(self):
+        rgb = self._ZONE_RGB.get(self.zone_type)
+        if not rgb:
+            rgb = self._ZONE_RGB["Входная зона"]
+        base_color = QColor(*rgb)
+        self.setPen(QPen(base_color, 2))
+        fill_color = QColor(base_color)
+        fill_color.setAlpha(50)
+        self.setBrush(QBrush(fill_color))
 
     def paint(self, painter, option, widget=None):
         super().paint(painter, option, widget)
@@ -877,6 +1245,21 @@ class RectZoneItem(QGraphicsRectItem):
         audio_info = None
         if isinstance(hall, HallItem):
             audio_info = hall.zone_audio_tracks.get(self.zone_num)
+        if (
+            not audio_info
+            and self.zone_type in ("Переходная", "Переходная зона")
+            and mw
+        ):
+            for candidate in mw.halls:
+                same_number = candidate.number == self.zone_num
+                if not same_number:
+                    try:
+                        same_number = int(candidate.number) == int(self.zone_num)
+                    except (TypeError, ValueError):
+                        same_number = False
+                if same_number and candidate.audio_settings:
+                    audio_info = candidate.audio_settings
+                    break
         if audio_info:
             audio_line = format_audio_menu_line(audio_info)
             if audio_line:
@@ -898,12 +1281,7 @@ class RectZoneItem(QGraphicsRectItem):
                 self.zone_type = values['zone_type']
                 self.zone_angle = values['angle']
                 self.update_zvalue()
-                if self.zone_type in ("Входная зона", "Переходная"):
-                    self.setPen(QPen(QColor(0,128,0),2))
-                    self.setBrush(QBrush(QColor(0,128,0,50)))
-                else:
-                    self.setPen(QPen(QColor(128,0,128),2))
-                    self.setBrush(QBrush(QColor(128,0,128,50)))
+                self._apply_zone_palette()
                 ppcm = scene.pixel_per_cm_x
                 w_px = values['w'] * ppcm * 100
                 h_px = values['h'] * ppcm * 100
@@ -1327,6 +1705,12 @@ class PlanEditorMainWindow(QMainWindow):
 
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
+
+        dark_color = QColor("#e3e3e3")
+        palette = self.palette()
+        palette.setColor(QPalette.Window, dark_color)
+        self.setPalette(palette)
+        self.setAutoFillBackground(True)
         self._readme_path = os.path.join(os.path.dirname(__file__), "readme.md")
         self._cached_readme_text = None
         self._cached_version = None
@@ -1336,20 +1720,125 @@ class PlanEditorMainWindow(QMainWindow):
         self.view = MyGraphicsView(self.scene)
         self.view.setRenderHint(QPainter.Antialiasing)
         self.view.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
-        self.setCentralWidget(self.view)
+
+        central_widget = QWidget()
+        central_widget.setObjectName("centralContainer")
+        central_layout = QVBoxLayout(central_widget)
+        margin = 8
+        central_layout.setContentsMargins(margin, margin, margin, margin)
+
+        central_frame = QWidget()
+        central_frame.setObjectName("centralFrame")
+        frame_layout = QVBoxLayout(central_frame)
+        frame_layout.setContentsMargins(0, 0, 0, 0)
+        frame_layout.addWidget(self.view)
+
+        central_widget.setStyleSheet(
+            """
+            QWidget#centralContainer {
+                background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#centralFrame {
+                border: none;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#centralFrame > * {
+                background-color: transparent;
+            }
+            """
+        )
+        central_layout.addWidget(central_frame)
+        self.setCentralWidget(central_widget)
 
         self.tree = QTreeWidget(); self.tree.setHeaderLabel("Объекты"); self.tree.setWordWrap(True)
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
         self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
 
-        dock = QDockWidget("Список объектов", self); dock.setWidget(self.tree)
-        dock.setFeatures(QDockWidget.DockWidgetMovable|QDockWidget.DockWidgetFloatable)
+        dock_container = QWidget()
+        dock_container.setObjectName("dockContainer")
+        dock_layout = QVBoxLayout(dock_container)
+        dock_layout.setContentsMargins(margin, margin, margin, margin)
+
+        dock_frame = QWidget()
+        dock_frame.setObjectName("dockFrame")
+        dock_frame_layout = QVBoxLayout(dock_frame)
+        dock_frame_layout.setContentsMargins(0, 0, 0, 0)
+        dock_frame_layout.addWidget(self.tree)
+
+        dock_container.setStyleSheet(
+            """
+            QWidget#dockContainer {
+                background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#dockFrame {
+                border: none;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#dockFrame > * {
+                background-color: transparent;
+            }
+            QTreeWidget {
+                background-color: transparent;
+            }
+            """
+        )
+        dock_layout.addWidget(dock_frame)
+
+        dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        self.objects_dock = dock
+
+        self.tracks_panel = TracksListWidget(self)
+
+        tracks_container = QWidget()
+        tracks_container.setObjectName("tracksDockContainer")
+        tracks_layout = QVBoxLayout(tracks_container)
+        tracks_layout.setContentsMargins(margin, margin, margin, margin)
+
+        tracks_frame = QWidget()
+        tracks_frame.setObjectName("tracksDockFrame")
+        tracks_frame_layout = QVBoxLayout(tracks_frame)
+        tracks_frame_layout.setContentsMargins(0, 0, 0, 0)
+        tracks_frame_layout.addWidget(self.tracks_panel)
+
+        tracks_container.setStyleSheet(
+            """
+            QWidget#tracksDockContainer {
+                background-color: rgba(255, 255, 255, 25);
+            }
+            QWidget#tracksDockFrame {
+                border: none;
+                border-radius: 8px;
+                background-color: rgba(255, 255, 255, 235);
+            }
+            QWidget#tracksDockFrame > * {
+                background-color: transparent;
+            }
+            QTreeWidget {
+                background-color: transparent;
+            }
+            """
+        )
+        tracks_layout.addWidget(tracks_frame)
+
+        tracks_dock = QDockWidget("Список треков", self)
+        tracks_dock.setWidget(tracks_container)
+        tracks_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        tracks_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.addDockWidget(Qt.TopDockWidgetArea, tracks_dock)
+        tracks_dock.hide()
+        self.tracks_dock = tracks_dock
 
         self._create_actions()
         self._create_menus()
         self._create_toolbars()
+
+        self.objects_dock.visibilityChanged.connect(self._on_objects_dock_visibility_changed)
+        self.tracks_dock.visibilityChanged.connect(self._on_tracks_dock_visibility_changed)
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
@@ -1363,6 +1852,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._restoring_state = False
         self._undo_bg_cache_key = None
         self._undo_bg_image = ""
+        self._saved_state_snapshot = None
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -1370,6 +1860,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().setMinimumHeight(30)
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
+        self.populate_tracks_table()
 
     def _apply_app_icon(self):
         icon_path = os.path.join(self._icons_dir, "app.png")
@@ -1392,7 +1883,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         self.action_open = QAction(
             load_icon("open.png", QStyle.SP_DialogOpenButton),
-            "Открыть изображение",
+            "Новый проект",
             self,
         )
         self.action_open.triggered.connect(self.open_image)
@@ -1404,6 +1895,12 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_save.triggered.connect(self.save_project)
 
+        self.action_save_as = QAction(
+            "Сохранить проект как…",
+            self,
+        )
+        self.action_save_as.triggered.connect(self.save_project_as)
+
         self.action_load = QAction(
             load_icon("load.png", QStyle.SP_DialogOpenButton),
             "Загрузить проект",
@@ -1411,12 +1908,19 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_load.triggered.connect(self.load_project)
 
+        self.action_import = QAction(
+            load_icon("import.png", QStyle.SP_DialogOpenButton),
+            "Импорт конфигурации",
+            self,
+        )
+        self.action_import.triggered.connect(self.show_import_menu)
+
         self.action_export = QAction(
             load_icon("export.png", QStyle.SP_DialogSaveButton),
             "Экспорт конфигурации",
             self,
         )
-        self.action_export.triggered.connect(self.export_config)
+        self.action_export.triggered.connect(self.show_export_menu)
 
         self.action_pdf = QAction(
             load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
@@ -1475,6 +1979,16 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_about = QAction("О приложении...", self)
         self.action_about.triggered.connect(self.show_about_dialog)
 
+        self.action_toggle_objects_dock = QAction("Окно \"Список объектов\"", self)
+        self.action_toggle_objects_dock.setCheckable(True)
+        self.action_toggle_objects_dock.setChecked(True)
+        self.action_toggle_objects_dock.toggled.connect(self._toggle_objects_dock)
+
+        self.action_toggle_tracks_dock = QAction("Окно \"Список треков\"", self)
+        self.action_toggle_tracks_dock.setCheckable(True)
+        self.action_toggle_tracks_dock.setChecked(False)
+        self.action_toggle_tracks_dock.toggled.connect(self._toggle_tracks_dock)
+
     def _create_menus(self):
         menu_bar = self.menuBar()
 
@@ -1482,8 +1996,10 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addAction(self.action_open)
         file_menu.addSeparator()
         file_menu.addAction(self.action_save)
+        file_menu.addAction(self.action_save_as)
         file_menu.addAction(self.action_load)
         file_menu.addSeparator()
+        file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
         file_menu.addAction(self.action_pdf)
 
@@ -1499,13 +2015,39 @@ class PlanEditorMainWindow(QMainWindow):
         tools_menu.addAction(self.action_add_anchor)
         tools_menu.addAction(self.action_add_zone)
 
+        view_menu = menu_bar.addMenu("Вид")
+        view_menu.addAction(self.action_toggle_objects_dock)
+        view_menu.addAction(self.action_toggle_tracks_dock)
+
         help_menu = menu_bar.addMenu("Справка")
         help_menu.addAction(self.action_help)
         help_menu.addSeparator()
         help_menu.addAction(self.action_about)
 
+        menu_bar.setStyleSheet(
+            """
+            QMenuBar {
+                background-color: rgba(255, 255, 255, 235);
+                border-bottom: 1px solid #b8b8b8;
+                padding: 4px 6px;
+            }
+            QMenuBar::item {
+                padding: 4px 10px;
+                border-radius: 4px;
+            }
+            QMenuBar::item:selected {
+                background-color: rgba(240, 240, 240, 220);
+            }
+            """
+        )
+
     def _create_toolbars(self):
-        icon_size = QSize(48, 48)
+        base_icon_size = QSize(48, 48)
+        scale_factor = 1.2
+        icon_size = QSize(
+            int(round(base_icon_size.width() * scale_factor)),
+            int(round(base_icon_size.height() * scale_factor)),
+        )
 
         file_toolbar = QToolBar("Файл", self)
         file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -1515,9 +2057,11 @@ class PlanEditorMainWindow(QMainWindow):
         file_toolbar.addAction(self.action_save)
         file_toolbar.addAction(self.action_load)
         self._add_toolbar_group_separator(file_toolbar)
+        file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
+        self.file_toolbar = file_toolbar
 
         tools_toolbar = QToolBar("Инструменты", self)
         tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
@@ -1532,6 +2076,68 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.undo_action)
         self.addToolBar(tools_toolbar)
+        self.tools_toolbar = tools_toolbar
+
+        toolbar_stylesheet = (
+            """
+            QToolBar {
+                background-color: rgba(255, 255, 255, 235);
+                border-top: 1px solid #c6c6c6;
+                border-bottom: 1px solid #a9a9a9;
+                padding: 3px 8px;
+            }
+            QToolBar::separator {
+                width: 1px;
+                background-color: #b5b5b5;
+                margin: 0 6px;
+            }
+            QToolBar QToolButton {
+                margin: 2px 4px;
+                padding: 2px 4px;
+                border-radius: 4px;
+            }
+            QToolBar QToolButton:hover {
+                background-color: rgba(240, 240, 240, 220);
+            }
+            QToolBar QToolButton:pressed {
+                background-color: rgba(225, 225, 225, 220);
+            }
+            """
+        )
+        self._toolbar_stylesheet = toolbar_stylesheet
+
+    def _toggle_objects_dock(self, visible: bool):
+        if getattr(self, "objects_dock", None) is None:
+            return
+        self.objects_dock.setVisible(visible)
+
+    def _on_objects_dock_visibility_changed(self, visible: bool):
+        if getattr(self, "action_toggle_objects_dock", None) is None:
+            return
+        self.action_toggle_objects_dock.blockSignals(True)
+        self.action_toggle_objects_dock.setChecked(visible)
+        self.action_toggle_objects_dock.blockSignals(False)
+
+        for toolbar in (getattr(self, "file_toolbar", None), getattr(self, "tools_toolbar", None)):
+            if toolbar is None:
+                continue
+            toolbar.setMovable(False)
+            toolbar.setContentsMargins(6, 3, 6, 3)
+            if toolbar.layout():
+                toolbar.layout().setSpacing(8)
+            toolbar.setStyleSheet(getattr(self, "_toolbar_stylesheet", ""))
+
+    def _toggle_tracks_dock(self, visible: bool):
+        if getattr(self, "tracks_dock", None) is None:
+            return
+        self.tracks_dock.setVisible(visible)
+
+    def _on_tracks_dock_visibility_changed(self, visible: bool):
+        if getattr(self, "action_toggle_tracks_dock", None) is None:
+            return
+        self.action_toggle_tracks_dock.blockSignals(True)
+        self.action_toggle_tracks_dock.setChecked(visible)
+        self.action_toggle_tracks_dock.blockSignals(False)
 
     def _load_readme_text(self) -> str | None:
         if self._cached_readme_text is not None:
@@ -1571,7 +2177,11 @@ class PlanEditorMainWindow(QMainWindow):
         layout = QVBoxLayout(dialog)
 
         browser = QTextBrowser(dialog)
-        browser.setPlainText(text)
+        if hasattr(browser, "setMarkdown"):
+            browser.setMarkdown(text)
+        else:
+            browser.setPlainText(text)
+        browser.setOpenExternalLinks(True)
         layout.addWidget(browser)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Close, parent=dialog)
@@ -1845,6 +2455,20 @@ class PlanEditorMainWindow(QMainWindow):
     def perform_calibration(self):
         if not self.scene.pixmap:
             QMessageBox.warning(self, "Ошибка", "Сначала загрузите изображение!"); return
+        confirm_text = (
+            "Для калибровки  координатной сетки необходимо будет указать на плане 2 точки, "
+            "обозначив отрезок известной длины. После этого задать реальную длину отрезка в см. "
+            "Продолжить?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Калибровка",
+            confirm_text,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
         self.set_mode("calibrate")
         self.statusBar().showMessage("Укажите 2 точки на плане для обозначения отрезка известной длины")
     def resnap_objects(self):
@@ -1955,6 +2579,12 @@ class PlanEditorMainWindow(QMainWindow):
         else:
             super().keyPressEvent(event)
 
+    def populate_tracks_table(self):
+        panel = getattr(self, "tracks_panel", None)
+        if panel is None:
+            return
+        panel.refresh()
+
     def populate_tree(self):
         self.last_selected_items = []
         self.tree.clear()
@@ -2007,6 +2637,8 @@ class PlanEditorMainWindow(QMainWindow):
 
             hi.setExpanded(True)
 
+        self.populate_tracks_table()
+
     def set_mode(self, mode):
         if not self.grid_calibrated and mode!="calibrate":
             QMessageBox.information(self,"Внимание","Сначала выполните калибровку!"); return
@@ -2014,29 +2646,95 @@ class PlanEditorMainWindow(QMainWindow):
         msgs = {"hall":"Выделите зал.","anchor":"Кликните в зал.","zone":"Выделите зону.","calibrate":"Укажите 2 точки."}
         self.statusBar().showMessage(msgs.get(mode,""))
 
+    def _has_active_project(self) -> bool:
+        pixmap = getattr(self.scene, "pixmap", None)
+        if pixmap is not None and not pixmap.isNull():
+            return True
+        return bool(self.halls or self.anchors)
+
+    def _has_unsaved_changes(self) -> bool:
+        if not self._has_active_project():
+            return False
+        current_state = self.capture_state()
+        if self._saved_state_snapshot is None:
+            return bool(
+                current_state.get("image_data")
+                or current_state.get("halls")
+                or current_state.get("anchors")
+            )
+        return current_state != self._saved_state_snapshot
+
+    def _mark_state_as_saved(self):
+        self._saved_state_snapshot = self.capture_state()
+
+    def _confirm_save_discard(self, question: str) -> bool:
+        if not self._has_unsaved_changes():
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Сохранить проект",
+            question,
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self.save_project()
+        return True
+
+    def _confirm_save_before_new_project(self) -> bool:
+        if not self._has_active_project():
+            return True
+        return self._confirm_save_discard("Сохранить текущий проект перед созданием нового?")
+
+    def _confirm_save_before_load(self) -> bool:
+        if not self._has_active_project():
+            return True
+        return self._confirm_save_discard("Сохранить текущий проект перед загрузкой другого?")
+
     def open_image(self):
-        fp,_ = QFileDialog.getOpenFileName(self,"Открыть изображение","","Изображения (*.png *.jpg *.bmp)")
-        if not fp: return
+        if not self._confirm_save_before_new_project():
+            return
+        message = (
+            "Для создания нового проекта загрузите план помещения в формате jpg, png, bmp, "
+            "после чего выполните калибровку координатной сетки, указав на плане 2 точки, "
+            "образующие отрезок известной длины. Продолжить?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Новый проект",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        fp, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выбор плана помещения",
+            "",
+            "Изображения (*.png *.jpg *.bmp)",
+        )
+        if not fp:
+            return
         pix = QPixmap(fp)
         if pix.isNull():
-            QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
+            QMessageBox.warning(self, "Ошибка", "Не удалось загрузить.")
+            return
         prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
         self.scene.pixmap = None
         self._reset_background_cache()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
+        self.current_project_file = None
+        self._saved_state_snapshot = None
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
         self.push_undo_state(prev_state)
 
-    def save_project(self):
-        if not self.current_project_file:
-            fp,_ = QFileDialog.getSaveFileName(self,"Сохранить проект","","*.proj")
-            if not fp: return
-            self.current_project_file = fp
-        else:
-            fp = self.current_project_file
+    def _collect_project_data(self):
         buf_data = ""
         if self.scene.pixmap:
             buf = QBuffer(); buf.open(QBuffer.WriteOnly)
@@ -2084,14 +2782,362 @@ class PlanEditorMainWindow(QMainWindow):
             }
             if a.bound: ad["bound"] = True
             data["anchors"].append(ad)
+        return data
+
+    def _save_project_file(self, fp, data):
         try:
-            with open(fp,"w",encoding="utf-8") as f:
-                json.dump(data,f,ensure_ascii=False,indent=4)
-            QMessageBox.information(self,"Сохранено","Проект сохранён.")
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
-            QMessageBox.critical(self,"Ошибка",f"Не удалось сохранить:\n{e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
+            return False
+        QMessageBox.information(self, "Сохранено", "Проект сохранён.")
+        return True
+
+    def save_project(self):
+        target = self.current_project_file
+        if not target:
+            target, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", "", "*.proj")
+            if not target:
+                return False
+        data = self._collect_project_data()
+        if self._save_project_file(target, data):
+            self.current_project_file = target
+            self._mark_state_as_saved()
+            return True
+        return False
+
+    def save_project_as(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Сохранить проект как", "", "*.proj")
+        if not fp:
+            return False
+        data = self._collect_project_data()
+        if self._save_project_file(fp, data):
+            self.current_project_file = fp
+            self._mark_state_as_saved()
+            return True
+        return False
+
+    def show_import_menu(self):
+        menu = QMenu(self)
+        rooms_action = menu.addAction("Импортировать объекты")
+        tracks_action = menu.addAction("Импортировать аудиофайлы")
+        global_pos = QCursor.pos()
+        if not self.rect().contains(self.mapFromGlobal(global_pos)):
+            global_pos = self.mapToGlobal(self.rect().center())
+        chosen = menu.exec(global_pos)
+        if chosen == rooms_action:
+            self.import_rooms_config()
+        elif chosen == tracks_action:
+            self.import_tracks_config()
+
+    def show_export_menu(self):
+        menu = QMenu(self)
+        rooms_action = menu.addAction("Экспортировать объекты")
+        tracks_action = menu.addAction("Экспортировать аудиофайлы")
+        global_pos = QCursor.pos()
+        if not self.rect().contains(self.mapFromGlobal(global_pos)):
+            global_pos = self.mapToGlobal(self.rect().center())
+        chosen = menu.exec(global_pos)
+        if chosen == rooms_action:
+            self.export_rooms_config()
+        elif chosen == tracks_action:
+            self.export_tracks_config()
+
+    def import_rooms_config(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "Импорт объектов", "", "JSON файлы (*.json)")
+        if not fp:
+            return
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{e}")
+            return
+        rooms = data.get("rooms") if isinstance(data, dict) else None
+        if not isinstance(rooms, list):
+            QMessageBox.warning(self, "Ошибка", "Выбранный файл не соответствует формату rooms.json.")
+            return
+
+        ppcm = self.scene.pixel_per_cm_x or 0.0
+        if ppcm <= 0:
+            QMessageBox.warning(self, "Ошибка", "Перед импортом объектов выполните калибровку масштаба.")
+            return
+
+        prev_state = self.capture_state()
+        hall_map = {h.number: h for h in self.halls}
+        zone_audio_backup = {h.number: copy.deepcopy(h.zone_audio_tracks) for h in self.halls if h.zone_audio_tracks}
+        existing_zone_count = sum(1 for h in self.halls for ch in h.childItems() if isinstance(ch, RectZoneItem))
+        existing_anchor_count = len(self.anchors)
+        changed = bool(existing_zone_count or existing_anchor_count)
+
+        for hall in self.halls:
+            for child in list(hall.childItems()):
+                if isinstance(child, RectZoneItem):
+                    child.scene().removeItem(child)
+            hall.zone_audio_tracks.clear()
+        for anchor in list(self.anchors):
+            self.scene.removeItem(anchor)
+        self.anchors.clear()
+
+        missing_halls: list[int] = []
+        for room in rooms:
+            if not isinstance(room, dict):
+                continue
+            try:
+                hall_number = int(room.get("num"))
+            except (TypeError, ValueError):
+                continue
+            hall = hall_map.get(hall_number)
+            if hall is None:
+                missing_halls.append(hall_number)
+                continue
+
+            width = room.get("width")
+            height = room.get("height")
+            try:
+                width_m = float(width)
+                height_m = float(height)
+            except (TypeError, ValueError):
+                width_m = height_m = None
+            if width_m and width_m > 0 and height_m and height_m > 0:
+                w_px = width_m * ppcm * 100
+                h_px = height_m * ppcm * 100
+                hall.prepareGeometryChange()
+                hall.setRect(0, 0, w_px, h_px)
+                hall.setZValue(-w_px * h_px)
+                changed = True
+
+            created_zone_numbers: set[int] = set()
+
+            def add_zone(section: dict | None, zone_type: str) -> bool:
+                if not isinstance(section, dict):
+                    return False
+                try:
+                    w_m = float(section.get("w", 0))
+                    h_m = float(section.get("h", 0))
+                    x_m = float(section.get("x", 0))
+                    y_m = float(section.get("y", 0))
+                    angle = float(section.get("angle", 0))
+                except (TypeError, ValueError):
+                    return False
+                if w_m <= 0 or h_m <= 0:
+                    return False
+                w_px = w_m * ppcm * 100
+                h_px = h_m * ppcm * 100
+                px = x_m * ppcm * 100
+                py = hall.rect().height() - y_m * ppcm * 100
+                RectZoneItem(QPointF(px, py), w_px, h_px, zone_number, zone_type, angle, hall)
+                return True
+
+            zones = room.get("zones") if isinstance(room.get("zones"), list) else []
+            for zone in zones:
+                if not isinstance(zone, dict):
+                    continue
+                try:
+                    zone_number = int(zone.get("num"))
+                except (TypeError, ValueError):
+                    continue
+                bound = bool(zone.get("bound", False))
+                if bound:
+                    if add_zone(zone.get("enter"), "Переходная"):
+                        created_zone_numbers.add(zone_number)
+                        changed = True
+                else:
+                    entered = add_zone(zone.get("enter"), "Входная зона")
+                    exited = add_zone(zone.get("exit"), "Выходная зона")
+                    if entered or exited:
+                        created_zone_numbers.add(zone_number)
+                        changed = True
+
+            anchors = room.get("anchors") if isinstance(room.get("anchors"), list) else []
+            for anchor_data in anchors:
+                if not isinstance(anchor_data, dict):
+                    continue
+                try:
+                    anchor_id = int(anchor_data.get("id"))
+                    x_m = float(anchor_data.get("x", 0))
+                    y_m = float(anchor_data.get("y", 0))
+                    z_m = float(anchor_data.get("z", 0))
+                except (TypeError, ValueError):
+                    continue
+                px = x_m * ppcm * 100
+                py = hall.rect().height() - y_m * ppcm * 100
+                scene_pos = hall.mapToScene(QPointF(px, py))
+                anchor_item = AnchorItem(scene_pos.x(), scene_pos.y(), anchor_id, main_hall_number=hall.number, scene=self.scene)
+                anchor_item.z = int(round(z_m * 100))
+                if anchor_data.get("bound"):
+                    anchor_item.bound = True
+                self.scene.addItem(anchor_item)
+                self.anchors.append(anchor_item)
+                changed = True
+
+            saved_audio = zone_audio_backup.get(hall_number, {})
+            if saved_audio:
+                for zone_id in created_zone_numbers:
+                    audio_info = saved_audio.get(zone_id)
+                    if audio_info:
+                        hall.zone_audio_tracks[zone_id] = copy.deepcopy(audio_info)
+
+        if missing_halls:
+            missing_str = ", ".join(str(n) for n in sorted(set(missing_halls)))
+            QMessageBox.warning(self, "Предупреждение", f"В проекте отсутствуют залы: {missing_str}. Объекты этих залов не были импортированы.")
+
+        self.populate_tree()
+        if changed or rooms:
+            self.push_undo_state(prev_state)
+        self.statusBar().showMessage("Импорт объектов завершён.", 5000)
+        QMessageBox.information(self, "Импорт", "Импорт объектов завершён.")
+
+    def _build_audio_info_from_track(self, track: dict, file_sizes: dict[str, int] | None = None):
+        filename = track.get("audio")
+        if not filename:
+            return None
+        try:
+            base_id = int(track.get("id"))
+        except (TypeError, ValueError):
+            base_id = None
+        size_bytes = 0
+        if isinstance(file_sizes, dict) and filename in file_sizes:
+            try:
+                size_bytes = int(file_sizes.get(filename, 0) or 0)
+            except (TypeError, ValueError):
+                size_bytes = 0
+        if size_bytes <= 0:
+            try:
+                size_bytes = int(track.get("size") or 0)
+            except (TypeError, ValueError):
+                size_bytes = 0
+        extras = []
+        for value in track.get("multi_id", []) or []:
+            try:
+                extra_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if base_id is not None and extra_id == base_id:
+                continue
+            extras.append(extra_id)
+        info = {
+            "filename": filename,
+            "data": "",
+            "duration_ms": int(track.get("duration_ms", 0) or 0),
+            "size": size_bytes,
+            "extra_ids": extras,
+            "interruptible": bool(track.get("term", True)),
+            "reset": bool(track.get("reset", False)),
+            "play_once": bool(track.get("play_once", False))
+        }
+        name_value = track.get("name")
+        if isinstance(name_value, str) and name_value.strip():
+            info["display_name"] = name_value.strip()
+        if track.get("audio2"):
+            sec_size = 0
+            if isinstance(file_sizes, dict) and track["audio2"] in file_sizes:
+                try:
+                    sec_size = int(file_sizes.get(track["audio2"], 0) or 0)
+                except (TypeError, ValueError):
+                    sec_size = 0
+            info["secondary"] = {
+                "filename": track["audio2"],
+                "data": "",
+                "duration_ms": 0,
+                "size": sec_size
+            }
+        return info
+
+    def import_tracks_config(self):
+        fp, _ = QFileDialog.getOpenFileName(self, "Импорт аудиофайлов", "", "JSON файлы (*.json)")
+        if not fp:
+            return
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось прочитать файл:\n{e}")
+            return
+        tracks = data.get("tracks") if isinstance(data, dict) else None
+        if not isinstance(tracks, list):
+            QMessageBox.warning(self, "Ошибка", "Выбранный файл не соответствует формату tracks.json.")
+            return
+
+        file_sizes: dict[str, int] = {}
+        files_section = data.get("files") if isinstance(data, dict) else None
+        if isinstance(files_section, list):
+            for entry in files_section:
+                if not isinstance(entry, dict):
+                    continue
+                name = entry.get("name")
+                if not isinstance(name, str) or not name:
+                    continue
+                try:
+                    size_value = int(entry.get("size") or 0)
+                except (TypeError, ValueError):
+                    continue
+                file_sizes[name] = max(size_value, file_sizes.get(name, 0), 0)
+
+        prev_state = self.capture_state()
+        hall_map = {h.number: h for h in self.halls}
+        had_audio = any(h.audio_settings or h.zone_audio_tracks for h in self.halls)
+        for hall in self.halls:
+            hall.audio_settings = None
+            hall.zone_audio_tracks.clear()
+
+        changed = had_audio
+        unmatched_halls: set[int] = set()
+        unmatched_zones: set[int] = set()
+
+        for entry in tracks:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                track_id = int(entry.get("id"))
+            except (TypeError, ValueError):
+                continue
+            audio_info = self._build_audio_info_from_track(entry, file_sizes)
+            if not audio_info:
+                continue
+            target_hall = None
+            room_id = entry.get("room_id")
+            if isinstance(room_id, (int, float)):
+                target_hall = hall_map.get(int(room_id))
+            if target_hall is None:
+                target_hall = hall_map.get(track_id)
+            if entry.get("hall"):
+                if target_hall is None:
+                    unmatched_halls.add(track_id)
+                    continue
+                target_hall.audio_settings = audio_info
+                changed = True
+                continue
+            if target_hall is None:
+                possible = [h for h in self.halls if any(isinstance(ch, RectZoneItem) and ch.zone_num == track_id for ch in h.childItems())]
+                if len(possible) == 1:
+                    target_hall = possible[0]
+                else:
+                    unmatched_zones.add(track_id)
+                    continue
+            target_hall.zone_audio_tracks[track_id] = audio_info
+            changed = True
+
+        warnings = []
+        if unmatched_halls:
+            hall_list = ", ".join(str(x) for x in sorted(unmatched_halls))
+            warnings.append(f"Залы: {hall_list}")
+        if unmatched_zones:
+            zone_list = ", ".join(str(x) for x in sorted(unmatched_zones))
+            warnings.append(f"Зоны: {zone_list}")
+        if warnings:
+            QMessageBox.warning(self, "Предупреждение", "Не найдены объекты для следующих идентификаторов:\n" + "\n".join(warnings))
+
+        self.populate_tree()
+        if changed or tracks:
+            self.push_undo_state(prev_state)
+        self.statusBar().showMessage("Импорт аудиофайлов завершён.", 5000)
+        QMessageBox.information(self, "Импорт", "Импорт аудиофайлов завершён.")
 
     def load_project(self):
+        if not self._confirm_save_before_load():
+            return
         fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
         if not fp: return
         prev_state = self.capture_state()
@@ -2151,17 +3197,41 @@ class PlanEditorMainWindow(QMainWindow):
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
         self.push_undo_state(prev_state)
+        self._mark_state_as_saved()
 
-    def export_config(self):
-        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт JSON", "", "*.json")
+    def export_rooms_config(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт объектов", "", "JSON файлы (*.json)")
         if not fp:
             return
 
-        config = {"rooms": []}
-        audio_files_map = {}
-        track_entries = []
+        rooms_json_text, _ = self._prepare_export_payload()
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                f.write(rooms_json_text)
+            self.statusBar().showMessage("Экспорт объектов завершён.", 5000)
+            QMessageBox.information(self, "Экспорт", "Экспорт объектов завершён.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
-        # === helpers ===
+    def export_tracks_config(self):
+        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт аудиофайлов", "tracks.json", "JSON файлы (*.json)")
+        if not fp:
+            return
+
+        _, tracks_data = self._prepare_export_payload()
+        try:
+            with open(fp, "w", encoding="utf-8") as f:
+                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
+            self.statusBar().showMessage("Экспорт аудиофайлов завершён.", 5000)
+            QMessageBox.information(self, "Экспорт", "Экспорт аудиофайлов завершён.")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+
+    def _prepare_export_payload(self) -> tuple[str, dict]:
+        config = {"rooms": []}
+        audio_files_map: dict[str, int] = {}
+        track_entries_map: dict[str, dict] = {}
+
         def _bytes_from_b64(b64str: str) -> int:
             if not b64str:
                 return 0
@@ -2170,25 +3240,33 @@ class PlanEditorMainWindow(QMainWindow):
             except Exception:
                 return 0
 
-        def collect_audio_files(info):
-            """Собираем ИМЕНА и РАЗМЕРЫ (в байтах) аудиофайлов для tracks.json."""
-            if not info:
+        def _extract_size(info: dict | None) -> int:
+            if not isinstance(info, dict):
+                return 0
+            try:
+                size_val = int(info.get("size") or 0)
+            except (TypeError, ValueError):
+                size_val = 0
+            if size_val <= 0:
+                size_val = _bytes_from_b64(info.get("data", ""))
+            return max(size_val, 0)
+
+        def collect_audio_files(info: dict | None):
+            if not isinstance(info, dict):
                 return
             name = info.get("filename")
-            if name:
-                size_bytes = _bytes_from_b64(info.get("data", ""))
-                audio_files_map[name] = max(size_bytes, audio_files_map.get(name, 0))
-
+            if isinstance(name, str) and name:
+                size_bytes = _extract_size(info)
+                audio_files_map[name] = max(audio_files_map.get(name, 0), size_bytes)
             secondary = info.get("secondary")
             if isinstance(secondary, dict):
                 sec_name = secondary.get("filename")
-                if sec_name:
-                    size_bytes2 = _bytes_from_b64(secondary.get("data", ""))
-                    audio_files_map[sec_name] = max(size_bytes2, audio_files_map.get(sec_name, 0))
+                if isinstance(sec_name, str) and sec_name:
+                    size_bytes2 = _extract_size(secondary)
+                    audio_files_map[sec_name] = max(audio_files_map.get(sec_name, 0), size_bytes2)
 
-        def create_track_entry(info, room_id, is_hall):
-            """Структура трека; 'multi_id' добавляем ТОЛЬКО при наличии доп. ID."""
-            if not info:
+        def create_track_entry(info: dict | None, room_id: int, is_hall: bool):
+            if not isinstance(info, dict):
                 return None
             filename = info.get("filename")
             if not filename:
@@ -2207,7 +3285,6 @@ class PlanEditorMainWindow(QMainWindow):
                 "term": bool(info.get("interruptible", True))
             }
 
-            # только если есть хотя бы один дополнительный id
             if extras:
                 seen = set()
                 merged = []
@@ -2223,9 +3300,53 @@ class PlanEditorMainWindow(QMainWindow):
                 entry["audio2"] = secondary["filename"]
             return entry
 
+        def register_track_entry(entry: dict | None):
+            if not isinstance(entry, dict):
+                return
+            key = entry.get("audio")
+            if not key:
+                return
+            existing = track_entries_map.get(key)
+            if existing is None:
+                track_entries_map[key] = entry
+                return
+
+            existing["hall"] = bool(existing.get("hall")) or bool(entry.get("hall"))
+
+            new_room = entry.get("room_id")
+            old_room = existing.get("room_id")
+            if isinstance(new_room, int):
+                if not isinstance(old_room, int):
+                    existing["room_id"] = new_room
+                else:
+                    existing["room_id"] = min(old_room, new_room)
+
+            if entry.get("audio2") and not existing.get("audio2"):
+                existing["audio2"] = entry["audio2"]
+
+            existing["play_once"] = bool(existing.get("play_once")) or bool(entry.get("play_once"))
+            existing["reset"] = bool(existing.get("reset")) or bool(entry.get("reset"))
+            existing["term"] = bool(existing.get("term", True)) and bool(entry.get("term", True))
+
+            combined_ids: set[int] = set()
+            for value in (existing.get("id"), entry.get("id")):
+                if isinstance(value, int):
+                    combined_ids.add(value)
+            for seq in (existing.get("multi_id"), entry.get("multi_id")):
+                if isinstance(seq, list):
+                    for value in seq:
+                        if isinstance(value, int):
+                            combined_ids.add(value)
+            base_id = existing.get("id")
+            if isinstance(base_id, int) and base_id in combined_ids:
+                combined_ids.remove(base_id)
+            if combined_ids:
+                existing["multi_id"] = sorted(combined_ids)
+            elif "multi_id" in existing:
+                existing.pop("multi_id")
+
         # === rooms.json ===
         for h in self.halls:
-            # ширина/высота зала в метрах
             w_m = fix_negative_zero(round(h.rect().width() / (self.scene.pixel_per_cm_x * 100), 1))
             h_m = fix_negative_zero(round(h.rect().height() / (self.scene.pixel_per_cm_x * 100), 1))
 
@@ -2237,7 +3358,6 @@ class PlanEditorMainWindow(QMainWindow):
                 "zones": []
             }
 
-            # anchors
             for a in self.anchors:
                 if a.main_hall_number == h.number or h.number in a.extra_halls:
                     lp = h.mapFromScene(a.scenePos())
@@ -2248,8 +3368,7 @@ class PlanEditorMainWindow(QMainWindow):
                         ae["bound"] = True
                     room["anchors"].append(ae)
 
-            # zones
-            zones = {}
+            zones: dict[int, dict] = {}
             default = {"x": 0, "y": 0, "w": 0, "h": 0, "angle": 0}
             for ch in h.childItems():
                 if isinstance(ch, RectZoneItem):
@@ -2270,21 +3389,15 @@ class PlanEditorMainWindow(QMainWindow):
 
             config["rooms"].append(room)
 
-            # аудио для tracks.json (sizes в байтах)
             if h.audio_settings:
                 collect_audio_files(h.audio_settings)
-                entry = create_track_entry(h.audio_settings, h.number, True)
-                if entry:
-                    track_entries.append(entry)
+                register_track_entry(create_track_entry(h.audio_settings, h.number, True))
             for _, audio_info in sorted(h.zone_audio_tracks.items()):
                 if not audio_info:
                     continue
                 collect_audio_files(audio_info)
-                entry = create_track_entry(audio_info, h.number, False)
-                if entry:
-                    track_entries.append(entry)
+                register_track_entry(create_track_entry(audio_info, h.number, False))
 
-        # Сохраняем rooms.json (как текст для читабельности)
         rooms_strs = []
         for room in config["rooms"]:
             lines = [
@@ -2329,8 +3442,23 @@ class PlanEditorMainWindow(QMainWindow):
 
         rooms_json_text = '{\n"rooms": [\n' + ",\n".join(rooms_strs) + "\n]\n}"
 
-        # === tracks.json (files.size в байтах) ===
-        track_entries.sort(key=lambda item: (item["room_id"], not item["hall"], item["id"]))
+        track_entries = list(track_entries_map.values())
+
+        def _sort_key(item: dict):
+            room_id = item.get("room_id")
+            if not isinstance(room_id, int):
+                try:
+                    room_id = int(room_id)
+                except (TypeError, ValueError):
+                    room_id = 0
+            return (
+                room_id,
+                not bool(item.get("hall")),
+                item.get("id", 0),
+                item.get("audio", "")
+            )
+
+        track_entries.sort(key=_sort_key)
         files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
         tracks_data = {
             "files": files_list,
@@ -2338,23 +3466,11 @@ class PlanEditorMainWindow(QMainWindow):
             "tracks": track_entries,
             "version": datetime.now().strftime("%y%m%d")
         }
-        tracks_path = os.path.join(os.path.dirname(fp), "tracks.json")
 
-        try:
-            with open(fp, "w", encoding="utf-8") as f:
-                f.write(rooms_json_text)
-            with open(tracks_path, "w", encoding="utf-8") as f:
-                json.dump(tracks_data, f, ensure_ascii=False, indent=4)
-            QMessageBox.information(self, "Экспорт", "Экспорт завершён. Обновлены rooms.json и tracks.json.")
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+        return rooms_json_text, tracks_data
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
-                                     QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
-        if reply == QMessageBox.Yes:
-            self.save_project()
-        elif reply == QMessageBox.Cancel:
+        if not self._confirm_save_discard("Сохранить текущий проект перед выходом?"):
             event.ignore(); return
         try: self.scene.selectionChanged.disconnect(self.on_scene_selection_changed)
         except: pass
