@@ -264,12 +264,12 @@ class TracksListWidget(QWidget):
     HEADER_LABELS = [
         "Зал / Трек",
         "Аудиофайл",
-        "Имя",
         "Играть единожды",
         "Сброс",
         "Прерываемый",
         "Номер зала",
         "Доп. ID",
+        "Имя",
     ]
 
     def __init__(self, mainwindow):
@@ -294,13 +294,18 @@ class TracksListWidget(QWidget):
 
         header = self.tree.header()
         header.setStretchLastSection(False)
+        header.setMinimumSectionSize(24)
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.Stretch)
-        for col in (3, 4, 5):
-            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.Fixed)
+        header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(7, QHeaderView.Stretch)
+        header.setSectionResizeMode(7, QHeaderView.Fixed)
+
+        self._adjust_audio_column_width()
+        self._adjust_name_column_width()
 
         layout.addWidget(self.tree)
 
@@ -334,6 +339,7 @@ class TracksListWidget(QWidget):
                     self._add_track_item(hall_item, hall, info, False, track_id)
         finally:
             self._updating = False
+        self._adjust_name_column_width()
 
     @staticmethod
     def _normalize_sort_key(value):
@@ -359,19 +365,20 @@ class TracksListWidget(QWidget):
         title = f"Зал {hall.number}: основной трек" if is_hall_track else f"Зона {track_id}"
         item.setText(0, title)
         item.setText(1, str(info.get('filename', '') or ''))
-        item.setText(2, str(info.get('display_name', '') or ''))
+        item.setText(2, "")
         item.setText(3, "")
         item.setText(4, "")
-        item.setText(5, "")
-        item.setText(6, str(hall.number))
+        item.setText(5, str(hall.number))
+        item.setText(6, "")
+        item.setText(7, str(info.get('display_name', '') or ''))
 
         extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
         extras_text = ", ".join(str(x) for x in extras)
-        item.setText(7, extras_text)
+        item.setText(6, extras_text)
 
-        item.setCheckState(3, Qt.Checked if info.get('play_once') else Qt.Unchecked)
-        item.setCheckState(4, Qt.Checked if info.get('reset') else Qt.Unchecked)
-        item.setCheckState(5, Qt.Checked if info.get('interruptible', True) else Qt.Unchecked)
+        item.setCheckState(2, Qt.Checked if info.get('play_once') else Qt.Unchecked)
+        item.setCheckState(3, Qt.Checked if info.get('reset') else Qt.Unchecked)
+        item.setCheckState(4, Qt.Checked if info.get('interruptible', True) else Qt.Unchecked)
 
         payload = {
             "type": "track",
@@ -381,7 +388,7 @@ class TracksListWidget(QWidget):
         if not is_hall_track:
             payload["track_id"] = track_id
         item.setData(0, Qt.UserRole, payload)
-        item.setData(6, Qt.UserRole, hall.number)
+        item.setData(5, Qt.UserRole, hall.number)
 
         flags = Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable | Qt.ItemIsUserCheckable
         item.setFlags(flags)
@@ -416,17 +423,17 @@ class TracksListWidget(QWidget):
         if column == 1:
             changed = self._handle_filename_change(payload, item.text(1))
         elif column == 2:
-            changed = self._handle_display_name_change(payload, item.text(2))
+            changed = self._handle_flag_change(payload, 'play_once', item.checkState(2), False)
         elif column == 3:
-            changed = self._handle_flag_change(payload, 'play_once', item.checkState(3), False)
+            changed = self._handle_flag_change(payload, 'reset', item.checkState(3), False)
         elif column == 4:
-            changed = self._handle_flag_change(payload, 'reset', item.checkState(4), False)
+            changed = self._handle_flag_change(payload, 'interruptible', item.checkState(4), True)
         elif column == 5:
-            changed = self._handle_flag_change(payload, 'interruptible', item.checkState(5), True)
+            changed = self._handle_hall_number_change(payload, item.text(5))
         elif column == 6:
-            changed = self._handle_hall_number_change(payload, item.text(6))
+            changed = self._handle_extra_ids_change(payload, item.text(6))
         elif column == 7:
-            changed = self._handle_extra_ids_change(payload, item.text(7))
+            changed = self._handle_display_name_change(payload, item.text(7))
         else:
             changed = False
 
@@ -435,6 +442,34 @@ class TracksListWidget(QWidget):
             self._commit_snapshot()
         else:
             self._pending_snapshot = None
+
+    def _adjust_audio_column_width(self):
+        header = self.tree.header()
+        metrics = header.fontMetrics()
+        label = self.HEADER_LABELS[1]
+        width = metrics.horizontalAdvance(label) + 20
+        header.resizeSection(1, width)
+
+    def _adjust_name_column_width(self):
+        header = self.tree.header()
+        metrics = header.fontMetrics()
+        label_width = metrics.horizontalAdvance(self.HEADER_LABELS[-1]) + 20
+
+        max_text_width = 0
+
+        def _iterate(item):
+            nonlocal max_text_width
+            max_text_width = max(max_text_width, metrics.horizontalAdvance(item.text(7)))
+            for idx in range(item.childCount()):
+                _iterate(item.child(idx))
+
+        for index in range(self.tree.topLevelItemCount()):
+            _iterate(self.tree.topLevelItem(index))
+
+        min_width = max(label_width, metrics.averageCharWidth() * 4)
+        if max_text_width:
+            min_width = max(min_width, max_text_width // 2 + 10)
+        header.resizeSection(7, min_width)
 
     def _handle_filename_change(self, payload, new_value):
         hall, info, _ = self._resolve_track(payload)
@@ -1782,7 +1817,8 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_dock = QDockWidget("Список треков", self)
         tracks_dock.setWidget(tracks_container)
         tracks_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        self.addDockWidget(Qt.RightDockWidgetArea, tracks_dock)
+        tracks_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.addDockWidget(Qt.TopDockWidgetArea, tracks_dock)
         tracks_dock.hide()
         self.tracks_dock = tracks_dock
 
