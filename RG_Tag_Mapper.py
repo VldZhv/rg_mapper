@@ -3245,19 +3245,22 @@ class PlanEditorMainWindow(QMainWindow):
 
         host_edit = QLineEdit(dialog)
         host_edit.setPlaceholderText("example.com")
+        host_edit.setText("178.154.195.218")
         form_layout.addRow("Хост:", host_edit)
 
         login_edit = QLineEdit(dialog)
         login_edit.setPlaceholderText("user")
+        login_edit.setText("radiog")
         form_layout.addRow("Логин:", login_edit)
 
         target_dir_edit = QLineEdit(dialog)
         target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
+        target_dir_edit.setText("~/headphones")
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
         port_spin = QSpinBox(dialog)
         port_spin.setRange(1, 65535)
-        port_spin.setValue(22)
+        port_spin.setValue(26015)
         form_layout.addRow("Порт:", port_spin)
 
         password_edit = QLineEdit(dialog)
@@ -3270,6 +3273,7 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
         key_path_edit.setPlaceholderText("~/.ssh/id_rsa")
+        key_path_edit.setText(os.path.expanduser("~/headphones/id_rsa"))
         key_layout.addWidget(key_path_edit)
         browse_button = QPushButton("Обзор…", key_widget)
 
@@ -3278,7 +3282,7 @@ class PlanEditorMainWindow(QMainWindow):
                 self,
                 "Выберите приватный ключ SSH",
                 os.path.expanduser("~/.ssh"),
-                "OpenSSH ключи (*.pem *.key *.rsa *.ssh);;Все файлы (*)",
+                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh)",
             )
             if filename:
                 key_path_edit.setText(filename)
