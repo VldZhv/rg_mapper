@@ -1882,7 +1882,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         self.action_open = QAction(
             load_icon("open.png", QStyle.SP_DialogOpenButton),
-            "Открыть изображение",
+            "Новый проект",
             self,
         )
         self.action_open.triggered.connect(self.open_image)
@@ -2641,18 +2641,64 @@ class PlanEditorMainWindow(QMainWindow):
         msgs = {"hall":"Выделите зал.","anchor":"Кликните в зал.","zone":"Выделите зону.","calibrate":"Укажите 2 точки."}
         self.statusBar().showMessage(msgs.get(mode,""))
 
+    def _has_active_project(self) -> bool:
+        pixmap = getattr(self.scene, "pixmap", None)
+        if pixmap is not None and not pixmap.isNull():
+            return True
+        return bool(self.halls or self.anchors)
+
+    def _confirm_save_before_new_project(self) -> bool:
+        if not self._has_active_project():
+            return True
+        reply = QMessageBox.question(
+            self,
+            "Сохранить проект",
+            "Сохранить текущий проект перед созданием нового?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            QMessageBox.Save,
+        )
+        if reply == QMessageBox.Cancel:
+            return False
+        if reply == QMessageBox.Save:
+            return self.save_project()
+        return True
+
     def open_image(self):
-        fp,_ = QFileDialog.getOpenFileName(self,"Открыть изображение","","Изображения (*.png *.jpg *.bmp)")
-        if not fp: return
+        if not self._confirm_save_before_new_project():
+            return
+        message = (
+            "Для создания нового проекта загрузите план помещения в формате jpg, png, bmp, "
+            "после чего выполните калибровку координатной сетки, указав на плане 2 точки, "
+            "образующие отрезок известной длины. Продолжить?"
+        )
+        reply = QMessageBox.question(
+            self,
+            "Новый проект",
+            message,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        fp, _ = QFileDialog.getOpenFileName(
+            self,
+            "Выбор плана помещения",
+            "",
+            "Изображения (*.png *.jpg *.bmp)",
+        )
+        if not fp:
+            return
         pix = QPixmap(fp)
         if pix.isNull():
-            QMessageBox.warning(self,"Ошибка","Не удалось загрузить."); return
+            QMessageBox.warning(self, "Ошибка", "Не удалось загрузить.")
+            return
         prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear()
         self.scene.pixmap = None
         self._reset_background_cache()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
+        self.current_project_file = None
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
         self.push_undo_state(prev_state)
@@ -2722,18 +2768,22 @@ class PlanEditorMainWindow(QMainWindow):
         if not target:
             target, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", "", "*.proj")
             if not target:
-                return
+                return False
         data = self._collect_project_data()
         if self._save_project_file(target, data):
             self.current_project_file = target
+            return True
+        return False
 
     def save_project_as(self):
         fp, _ = QFileDialog.getSaveFileName(self, "Сохранить проект как", "", "*.proj")
         if not fp:
-            return
+            return False
         data = self._collect_project_data()
         if self._save_project_file(fp, data):
             self.current_project_file = fp
+            return True
+        return False
 
     def show_import_menu(self):
         menu = QMenu(self)
@@ -3387,7 +3437,8 @@ class PlanEditorMainWindow(QMainWindow):
         reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
                                      QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
         if reply == QMessageBox.Yes:
-            self.save_project()
+            if not self.save_project():
+                event.ignore(); return
         elif reply == QMessageBox.Cancel:
             event.ignore(); return
         try: self.scene.selectionChanged.disconnect(self.on_scene_selection_changed)
