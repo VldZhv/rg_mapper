@@ -1852,6 +1852,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._restoring_state = False
         self._undo_bg_cache_key = None
         self._undo_bg_image = ""
+        self._saved_state_snapshot = None
 
         self.view.setTransformationAnchor(QGraphicsView.AnchorUnderMouse)
         self.view.setDragMode(QGraphicsView.NoDrag)
@@ -2647,13 +2648,28 @@ class PlanEditorMainWindow(QMainWindow):
             return True
         return bool(self.halls or self.anchors)
 
-    def _confirm_save_before_new_project(self) -> bool:
+    def _has_unsaved_changes(self) -> bool:
         if not self._has_active_project():
+            return False
+        current_state = self.capture_state()
+        if self._saved_state_snapshot is None:
+            return bool(
+                current_state.get("image_data")
+                or current_state.get("halls")
+                or current_state.get("anchors")
+            )
+        return current_state != self._saved_state_snapshot
+
+    def _mark_state_as_saved(self):
+        self._saved_state_snapshot = self.capture_state()
+
+    def _confirm_save_discard(self, question: str) -> bool:
+        if not self._has_unsaved_changes():
             return True
         reply = QMessageBox.question(
             self,
             "Сохранить проект",
-            "Сохранить текущий проект перед созданием нового?",
+            question,
             QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
             QMessageBox.Save,
         )
@@ -2662,6 +2678,16 @@ class PlanEditorMainWindow(QMainWindow):
         if reply == QMessageBox.Save:
             return self.save_project()
         return True
+
+    def _confirm_save_before_new_project(self) -> bool:
+        if not self._has_active_project():
+            return True
+        return self._confirm_save_discard("Сохранить текущий проект перед созданием нового?")
+
+    def _confirm_save_before_load(self) -> bool:
+        if not self._has_active_project():
+            return True
+        return self._confirm_save_discard("Сохранить текущий проект перед загрузкой другого?")
 
     def open_image(self):
         if not self._confirm_save_before_new_project():
@@ -2699,6 +2725,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.current_project_file = None
+        self._saved_state_snapshot = None
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
         self.push_undo_state(prev_state)
@@ -2772,6 +2799,7 @@ class PlanEditorMainWindow(QMainWindow):
         data = self._collect_project_data()
         if self._save_project_file(target, data):
             self.current_project_file = target
+            self._mark_state_as_saved()
             return True
         return False
 
@@ -2782,6 +2810,7 @@ class PlanEditorMainWindow(QMainWindow):
         data = self._collect_project_data()
         if self._save_project_file(fp, data):
             self.current_project_file = fp
+            self._mark_state_as_saved()
             return True
         return False
 
@@ -3103,6 +3132,8 @@ class PlanEditorMainWindow(QMainWindow):
         QMessageBox.information(self, "Импорт", "Импорт аудиофайлов завершён.")
 
     def load_project(self):
+        if not self._confirm_save_before_load():
+            return
         fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
         if not fp: return
         prev_state = self.capture_state()
@@ -3162,6 +3193,7 @@ class PlanEditorMainWindow(QMainWindow):
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
         self.push_undo_state(prev_state)
+        self._mark_state_as_saved()
 
     def export_rooms_config(self):
         fp, _ = QFileDialog.getSaveFileName(self, "Экспорт объектов", "", "JSON файлы (*.json)")
