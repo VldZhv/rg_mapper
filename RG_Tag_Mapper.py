@@ -3466,12 +3466,7 @@ class PlanEditorMainWindow(QMainWindow):
         return rooms_json_text, tracks_data
 
     def closeEvent(self, event):
-        reply = QMessageBox.question(self,"Сохранить перед выходом?","Сохранить проект?",
-                                     QMessageBox.Yes|QMessageBox.No|QMessageBox.Cancel)
-        if reply == QMessageBox.Yes:
-            if not self.save_project():
-                event.ignore(); return
-        elif reply == QMessageBox.Cancel:
+        if not self._confirm_save_discard("Сохранить текущий проект перед выходом?"):
             event.ignore(); return
         try: self.scene.selectionChanged.disconnect(self.on_scene_selection_changed)
         except: pass
