@@ -3317,9 +3317,24 @@ class PlanEditorMainWindow(QMainWindow):
 
         try:
             if key_path.lower().endswith(".ppk"):
-                from paramiko.ppk import PPKKey
+                ppk_loader = None
+                import_error = None
+                try:
+                    from paramiko.ppk import PPKKey as _PPKKey
+                    ppk_loader = _PPKKey
+                except ModuleNotFoundError as exc:
+                    import_error = exc
+                    try:
+                        from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
+                        ppk_loader = _PPKKey
+                    except ModuleNotFoundError as exc_ppk:
+                        import_error = exc_ppk
+                if ppk_loader is None:
+                    raise ModuleNotFoundError(
+                        "Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk."
+                    ) from import_error
 
-                key_obj = PPKKey.from_file(key_path, password=passphrase)
+                key_obj = ppk_loader.from_file(key_path, password=passphrase)
             else:
                 key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
         except Exception as exc:
