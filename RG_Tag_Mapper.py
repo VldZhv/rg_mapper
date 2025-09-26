@@ -1,5 +1,6 @@
 ﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
-import sys, math, json, base64, os, copy
+import sys, math, json, base64, os, copy, posixpath
+import paramiko
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -1922,6 +1923,13 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_export.triggered.connect(self.show_export_menu)
 
+        self.action_upload = QAction(
+            load_icon("upload.png", QStyle.SP_ArrowUp),
+            "Выгрузить на сервер",
+            self,
+        )
+        self.action_upload.triggered.connect(self.upload_config_to_server)
+
         self.action_pdf = QAction(
             load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
             "Сохранить в PDF",
@@ -2001,6 +2009,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_upload)
         file_menu.addAction(self.action_pdf)
 
         edit_menu = menu_bar.addMenu("Правка")
@@ -2059,6 +2068,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
+        file_toolbar.addAction(self.action_upload)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
         self.file_toolbar = file_toolbar
@@ -3226,6 +3236,159 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.information(self, "Экспорт", "Экспорт аудиофайлов завершён.")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+
+    def upload_config_to_server(self):
+        rooms_json_text, tracks_data = self._prepare_export_payload()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Выгрузка на сервер")
+        form_layout = QFormLayout(dialog)
+
+        host_edit = QLineEdit(dialog)
+        host_edit.setPlaceholderText("example.com")
+        form_layout.addRow("Хост:", host_edit)
+
+        login_edit = QLineEdit(dialog)
+        login_edit.setPlaceholderText("user")
+        form_layout.addRow("Логин:", login_edit)
+
+        target_dir_edit = QLineEdit(dialog)
+        target_dir_edit.setPlaceholderText("~/rg_mapper")
+        form_layout.addRow("Каталог на сервере:", target_dir_edit)
+
+        password_edit = QLineEdit(dialog)
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
+        form_layout.addRow("Пароль к ключу:", password_edit)
+
+        key_widget = QWidget(dialog)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_path_edit = QLineEdit(key_widget)
+        key_path_edit.setPlaceholderText("/path/to/id_rsa.ppk")
+        key_layout.addWidget(key_path_edit)
+        browse_button = QPushButton("Обзор…", key_widget)
+
+        def browse_key_file():
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "Выберите ключ PuTTY",
+                "",
+                "PuTTY PPK (*.ppk);;Все файлы (*)",
+            )
+            if filename:
+                key_path_edit.setText(filename)
+
+        browse_button.clicked.connect(browse_key_file)
+        key_layout.addWidget(browse_button)
+        form_layout.addRow("Файл ключа:", key_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form_layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        host = host_edit.text().strip()
+        username = login_edit.text().strip()
+        remote_dir = target_dir_edit.text().strip()
+        key_path = key_path_edit.text().strip()
+        passphrase = password_edit.text() or None
+
+        if not host or not username or not key_path:
+            QMessageBox.warning(
+                self,
+                "Выгрузка на сервер",
+                "Заполните хост, логин и путь к ключу для подключения.",
+            )
+            return
+
+        try:
+            with open(key_path, "rb") as _key_file:
+                _key_file.read(1)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Не удалось открыть файл ключа:\n{exc}",
+            )
+            return
+
+        try:
+            if key_path.lower().endswith(".ppk"):
+                from paramiko.ppk import PPKKey
+
+                key_obj = PPKKey.from_file(key_path, password=passphrase)
+            else:
+                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Не удалось загрузить ключ:\n{exc}",
+            )
+            return
+
+        ssh = None
+        sftp = None
+        tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
+        rooms_bytes = rooms_json_text.encode("utf-8")
+        tracks_bytes = tracks_json_text.encode("utf-8")
+
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=host,
+                username=username,
+                pkey=key_obj,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            sftp = ssh.open_sftp()
+
+            remote_dir_clean = remote_dir.replace("\\", "/").strip()
+            if remote_dir_clean and remote_dir_clean not in (".", "./"):
+                try:
+                    sftp.listdir(remote_dir_clean)
+                except IOError as exc:
+                    raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
+                rooms_remote_path = posixpath.join(remote_dir_clean, "rooms.json")
+                tracks_remote_path = posixpath.join(remote_dir_clean, "tracks.json")
+            else:
+                rooms_remote_path = "rooms.json"
+                tracks_remote_path = "tracks.json"
+
+            with sftp.file(rooms_remote_path, "wb") as remote_rooms:
+                remote_rooms.write(rooms_bytes)
+                remote_rooms.flush()
+            with sftp.file(tracks_remote_path, "wb") as remote_tracks:
+                remote_tracks.write(tracks_bytes)
+                remote_tracks.flush()
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Ошибка при передаче данных:\n{exc}",
+            )
+            self.statusBar().showMessage("Ошибка выгрузки конфигурации.", 7000)
+            return
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+
+        self.statusBar().showMessage("Конфигурация выгружена на сервер.", 7000)
+        QMessageBox.information(self, "Выгрузка на сервер", "Конфигурация успешно передана на сервер.")
 
     def _prepare_export_payload(self) -> tuple[str, dict]:
         config = {"rooms": []}
