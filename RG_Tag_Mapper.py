@@ -3255,6 +3255,11 @@ class PlanEditorMainWindow(QMainWindow):
         target_dir_edit.setPlaceholderText("~/rg_mapper")
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
+        port_spin = QSpinBox(dialog)
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(22)
+        form_layout.addRow("Порт:", port_spin)
+
         password_edit = QLineEdit(dialog)
         password_edit.setEchoMode(QLineEdit.Password)
         password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
@@ -3294,6 +3299,7 @@ class PlanEditorMainWindow(QMainWindow):
         username = login_edit.text().strip()
         remote_dir = target_dir_edit.text().strip()
         key_path = key_path_edit.text().strip()
+        port = port_spin.value()
         passphrase = password_edit.text() or None
 
         if not host or not username or not key_path:
@@ -3356,6 +3362,7 @@ class PlanEditorMainWindow(QMainWindow):
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             ssh.connect(
                 hostname=host,
+                port=port,
                 username=username,
                 pkey=key_obj,
                 allow_agent=False,
