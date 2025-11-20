@@ -1511,7 +1511,8 @@ class ProximityZoneItem(QGraphicsItem):
 
         fill_radius = max(r_in, r_out)
         if fill_radius > 0:
-            fill_color = QColor(color_out)
+            fill_base = color_out if self.bound else color_in
+            fill_color = QColor(fill_base)
             fill_color.setAlpha(50)
             painter.setBrush(QBrush(fill_color))
             painter.setPen(Qt.NoPen)
@@ -1530,7 +1531,7 @@ class ProximityZoneItem(QGraphicsItem):
         font.setBold(True)
         painter.setFont(font)
         outline = QColor(180, 180, 180)
-        text_pos = QPointF(-self.boundingRect().width() / 2 + 2, -self.boundingRect().height() / 2 - 4)
+        text_pos = self.boundingRect().bottomLeft() + QPointF(2, -2)
         path = QPainterPath()
         path.addText(text_pos, font, str(self.zone_num))
         painter.setPen(QPen(outline, 2))
@@ -2227,7 +2228,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_add_zone.triggered.connect(lambda: self.set_mode("zone"))
 
         self.action_add_proximity_zone = QAction(
-            load_icon("zone.png", QStyle.SP_FileDialogNewFolder),
+            load_icon("zone2.png", QStyle.SP_FileDialogNewFolder),
             "Добавить зону по приближению",
             self,
         )
@@ -3606,6 +3607,7 @@ class PlanEditorMainWindow(QMainWindow):
         config = {"rooms": []}
         audio_files_map: dict[str, int] = {}
         track_entries_map: dict[str, dict] = {}
+        anchor_bound_flags = {a.number: bool(a.bound_explicit) for a in self.anchors}
 
         def _bytes_from_b64(b64str: str) -> int:
             if not b64str:
@@ -3739,7 +3741,7 @@ class PlanEditorMainWindow(QMainWindow):
                     xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
                     ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
                     ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
-                    if a.bound_explicit:
+                    if anchor_bound_flags.get(a.number, False):
                         ae["bound"] = True
                     room["anchors"].append(ae)
 
