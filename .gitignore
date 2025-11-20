@@ -6,3 +6,6 @@ dist/
 *.jpg
 *.bmp
 *.pdf
+id_rsa
+__pycache__/
+*.pyc

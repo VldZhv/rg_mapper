@@ -1,5 +1,6 @@
 ﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
-import sys, math, json, base64, os, copy
+import sys, math, json, base64, os, copy, posixpath
+import paramiko
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
     QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsLineItem, QMenu, QTreeWidget,
@@ -15,6 +16,35 @@ from PySide6.QtGui import (
 from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
 from datetime import datetime
 from mutagen.mp3 import MP3
+
+
+def find_default_ssh_key(base_dir: str) -> str | None:
+    try:
+        entries = os.listdir(base_dir)
+    except OSError:
+        return None
+
+    preferred_names = {
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_ecdsa_sk",
+        "id_ed25519_sk",
+    }
+    for name in preferred_names:
+        path = os.path.join(base_dir, name)
+        if os.path.isfile(path):
+            return path
+
+    allowed_suffixes = (".pem", ".key", ".rsa", ".ppk")
+    for entry in sorted(entries):
+        if entry.lower().endswith(allowed_suffixes):
+            path = os.path.join(base_dir, entry)
+            if os.path.isfile(path):
+                return path
+
+    return None
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
@@ -2163,6 +2193,34 @@ class PlanEditorMainWindow(QMainWindow):
         if app is not None:
             app.setWindowIcon(icon)
 
+    @staticmethod
+    def _sanitize_name_for_folder(name: str) -> str:
+        sanitized_chars = []
+        for ch in name:
+            if ch in ("/", "\\", ":", "*", "?", '"', "<", ">", "|"):
+                sanitized_chars.append("_")
+            elif ch.isspace():
+                sanitized_chars.append("_")
+            else:
+                sanitized_chars.append(ch)
+        sanitized = "".join(sanitized_chars).strip("_")
+        return sanitized
+
+    def _build_remote_export_folder_name(self) -> str:
+        timestamp = datetime.now().strftime("%y%m%d_%H%M")
+        candidates: list[str] = []
+        project_name = getattr(self, "project_name", "")
+        if isinstance(project_name, str) and project_name.strip():
+            candidates.append(project_name.strip())
+        if isinstance(self.current_project_file, str) and self.current_project_file:
+            candidates.append(os.path.splitext(os.path.basename(self.current_project_file))[0])
+
+        for name in candidates:
+            sanitized = self._sanitize_name_for_folder(name)
+            if sanitized:
+                return f"{sanitized}_{timestamp}"
+        return timestamp
+
     def _create_actions(self):
         def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
             path = os.path.join(self._icons_dir, filename)
@@ -2212,6 +2270,13 @@ class PlanEditorMainWindow(QMainWindow):
             self,
         )
         self.action_export.triggered.connect(self.show_export_menu)
+
+        self.action_upload = QAction(
+            load_icon("server.png", QStyle.SP_ArrowUp),
+            "Выгрузить на сервер",
+            self,
+        )
+        self.action_upload.triggered.connect(self.upload_config_to_server)
 
         self.action_pdf = QAction(
             load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
@@ -2299,6 +2364,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_upload)
         file_menu.addAction(self.action_pdf)
 
         edit_menu = menu_bar.addMenu("Правка")
@@ -2358,6 +2424,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
+        file_toolbar.addAction(self.action_upload)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
         self.file_toolbar = file_toolbar
@@ -3651,6 +3718,226 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.information(self, "Экспорт", "Экспорт аудиофайлов завершён.")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
+
+    def upload_config_to_server(self):
+        rooms_json_text, tracks_data = self._prepare_export_payload()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Выгрузка на сервер")
+        form_layout = QFormLayout(dialog)
+
+        host_edit = QLineEdit(dialog)
+        host_edit.setPlaceholderText("example.com")
+        form_layout.addRow("Хост:", host_edit)
+
+        login_edit = QLineEdit(dialog)
+        login_edit.setPlaceholderText("user")
+        form_layout.addRow("Логин:", login_edit)
+
+        target_dir_edit = QLineEdit(dialog)
+        target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
+        form_layout.addRow("Каталог на сервере:", target_dir_edit)
+
+        port_spin = QSpinBox(dialog)
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(22)
+        form_layout.addRow("Порт:", port_spin)
+
+        password_edit = QLineEdit(dialog)
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
+        form_layout.addRow("Пароль к ключу:", password_edit)
+
+        key_widget = QWidget(dialog)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_path_edit = QLineEdit(key_widget)
+        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
+        default_key_path = find_default_ssh_key(os.getcwd())
+        if default_key_path:
+            key_path_edit.setText(default_key_path)
+        key_layout.addWidget(key_path_edit)
+        browse_button = QPushButton("Обзор…", key_widget)
+
+        def browse_key_file():
+            filename, _ = QFileDialog.getOpenFileName(
+                self,
+                "Выберите приватный ключ SSH",
+                os.path.expanduser("~/.ssh"),
+                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh)",
+            )
+            if filename:
+                key_path_edit.setText(filename)
+
+        browse_button.clicked.connect(browse_key_file)
+        key_layout.addWidget(browse_button)
+        form_layout.addRow("Файл ключа:", key_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form_layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        host = host_edit.text().strip()
+        username = login_edit.text().strip()
+        remote_dir = target_dir_edit.text().strip()
+        key_path = key_path_edit.text().strip()
+        port = port_spin.value()
+        passphrase = password_edit.text() or None
+
+        if not host or not username or not key_path:
+            QMessageBox.warning(
+                self,
+                "Выгрузка на сервер",
+                "Заполните хост, логин и путь к ключу для подключения.",
+            )
+            return
+
+        try:
+            with open(key_path, "rb") as _key_file:
+                _key_file.read(1)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Не удалось открыть файл ключа:\n{exc}",
+            )
+            return
+
+        try:
+            key_obj = None
+            if key_path.lower().endswith(".ppk"):
+                import importlib.util
+
+                if importlib.util.find_spec("paramiko.ppk") is not None:
+                    from paramiko.ppk import PPKKey as _PPKKey
+                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
+                elif importlib.util.find_spec("paramiko_ppk") is not None:
+                    from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
+                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
+                else:
+                    raise ModuleNotFoundError(
+                        "Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk."
+                    )
+            else:
+                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Не удалось загрузить ключ:\n{exc}",
+            )
+            return
+
+        ssh = None
+        sftp = None
+        tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
+        rooms_bytes = rooms_json_text.encode("utf-8")
+        tracks_bytes = tracks_json_text.encode("utf-8")
+        export_folder_name = None
+        normalized_target_directory = None
+
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(
+                hostname=host,
+                port=port,
+                username=username,
+                pkey=key_obj,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            sftp = ssh.open_sftp()
+
+            remote_dir_clean = remote_dir.replace("\\", "/").strip()
+            remote_dir_effective = remote_dir_clean
+            if remote_dir_effective and remote_dir_effective not in (".", "./"):
+                try:
+                    if remote_dir_effective.startswith("~"):
+                        try:
+                            home_dir = sftp.normalize(".")
+                        except IOError:
+                            home_dir = sftp.normalize("~")
+                        subpath = remote_dir_effective[1:].lstrip("/")
+                        remote_dir_effective = (
+                            posixpath.join(home_dir, subpath) if subpath else home_dir
+                        )
+                    sftp.listdir(remote_dir_effective)
+                except IOError as exc:
+                    raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
+                try:
+                    base_dir = sftp.normalize(remote_dir_effective)
+                except IOError:
+                    base_dir = remote_dir_effective
+            else:
+                try:
+                    base_dir = sftp.normalize(".")
+                except IOError:
+                    base_dir = "."
+
+            export_folder_name = self._build_remote_export_folder_name()
+            target_directory = posixpath.join(base_dir, export_folder_name)
+            try:
+                sftp.mkdir(target_directory)
+            except IOError as exc:
+                raise IOError(
+                    f"Не удалось создать каталог {export_folder_name}: {exc}"
+                ) from exc
+
+            try:
+                normalized_target_directory = sftp.normalize(target_directory)
+            except IOError:
+                normalized_target_directory = target_directory
+
+            rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
+            tracks_remote_path = posixpath.join(normalized_target_directory, "tracks.json")
+
+            with sftp.file(rooms_remote_path, "wb") as remote_rooms:
+                remote_rooms.write(rooms_bytes)
+                remote_rooms.flush()
+            with sftp.file(tracks_remote_path, "wb") as remote_tracks:
+                remote_tracks.write(tracks_bytes)
+                remote_tracks.flush()
+
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Выгрузка на сервер",
+                f"Ошибка при передаче данных:\n{exc}",
+            )
+            self.statusBar().showMessage("Ошибка выгрузки конфигурации.", 7000)
+            return
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+
+        if normalized_target_directory:
+            status_suffix = f" в каталог {normalized_target_directory}"
+        elif export_folder_name:
+            status_suffix = f" в каталог {export_folder_name}"
+        else:
+            status_suffix = ""
+        self.statusBar().showMessage(
+            f"Конфигурация выгружена на сервер{status_suffix}.",
+            7000,
+        )
+        message_text = "Конфигурация успешно передана на сервер."
+        if normalized_target_directory:
+            message_text += f" Файлы сохранены в каталоге {normalized_target_directory}."
+        elif export_folder_name:
+            message_text += f" Файлы сохранены в каталоге {export_folder_name}."
+        QMessageBox.information(self, "Выгрузка на сервер", message_text)
 
     def _prepare_export_payload(self) -> tuple[str, dict]:
         config = {"rooms": []}
