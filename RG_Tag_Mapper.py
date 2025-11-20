@@ -1172,16 +1172,42 @@ class AnchorItem(QGraphicsEllipseItem):
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.update_zvalue()
             scene = self.scene()
+            mw = scene.mainwindow if scene else None
+            if mw and mw.add_mode == "proximity_zone":
+                params = mw.get_proximity_zone_parameters(self)
+                mw.add_mode = None
+                mw.statusBar().clearMessage()
+                if not params:
+                    event.accept()
+                    return
+                prev_state = mw.capture_state()
+                values = params
+                if not values['halls'] and self.main_hall_number is not None:
+                    values['halls'] = [self.main_hall_number]
+                zone = ProximityZoneItem(
+                    self,
+                    values['zone_num'],
+                    values['dist_in'],
+                    values['dist_out'],
+                    values['bound'],
+                    values['halls'],
+                    values['blist'],
+                    values.get('audio'),
+                )
+                mw.proximity_zones.append(zone)
+                mw.populate_tree()
+                mw.push_undo_state(prev_state)
+                event.accept()
+                return
+
+            self.update_zvalue()
             if scene and not (event.modifiers() & Qt.ControlModifier):
                 scene.clearSelection()
             self.setSelected(True)
-            if scene:
-                mw = scene.mainwindow
-                if mw and not getattr(mw, "_restoring_state", False):
-                    self._undo_initial_pos = QPointF(self.scenePos())
-                    self._undo_snapshot = mw.capture_state()
+            if scene and mw and not getattr(mw, "_restoring_state", False):
+                self._undo_initial_pos = QPointF(self.scenePos())
+                self._undo_snapshot = mw.capture_state()
         super().mousePressEvent(event)
         event.accept()
 
