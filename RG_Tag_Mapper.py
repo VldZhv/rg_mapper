@@ -1511,7 +1511,10 @@ class ProximityZoneItem(QGraphicsItem):
 
         fill_radius = max(r_in, r_out)
         if fill_radius > 0:
-            fill_base = color_out if self.bound else color_in
+            if self.bound:
+                fill_base = color_out
+            else:
+                fill_base = color_out if r_out >= r_in else color_in
             fill_color = QColor(fill_base)
             fill_color.setAlpha(50)
             painter.setBrush(QBrush(fill_color))
@@ -1531,9 +1534,14 @@ class ProximityZoneItem(QGraphicsItem):
         font.setBold(True)
         painter.setFont(font)
         outline = QColor(180, 180, 180)
-        text_pos = self.boundingRect().bottomLeft() + QPointF(2, -2)
+        metrics = painter.fontMetrics()
+        text = str(self.zone_num)
+        text_width = metrics.horizontalAdvance(text)
+        x = -text_width / 2
+        y = fill_radius - metrics.descent() - 2
+        text_pos = QPointF(x, y)
         path = QPainterPath()
-        path.addText(text_pos, font, str(self.zone_num))
+        path.addText(text_pos, font, text)
         painter.setPen(QPen(outline, 2))
         painter.drawPath(path)
         painter.fillPath(path, color_in if r_in > 0 else color_out)
