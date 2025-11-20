@@ -2874,7 +2874,17 @@ class PlanEditorMainWindow(QMainWindow):
     def get_proximity_zone_parameters(self, anchor: AnchorItem):
         default = 1 if not self.proximity_zones else max(z.zone_num for z in self.proximity_zones)+1
         halls_text = str(anchor.main_hall_number) if anchor.main_hall_number is not None else ""
-        dlg = ProximityZoneDialog(anchor.number, default, 1.0, 0.0, anchor.bound_explicit, halls_text, "", self)
+        dlg = ProximityZoneDialog(
+            anchor_id=anchor.number,
+            zone_num=default,
+            dist_in=1.0,
+            dist_out=0.0,
+            bound=anchor.bound_explicit,
+            halls=halls_text,
+            blist="",
+            audio_data=None,
+            parent=self,
+        )
         if dlg.exec() == QDialog.Accepted:
             return dlg.values()
         return None
