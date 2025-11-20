@@ -845,7 +845,7 @@ class ZoneEditDialog(QDialog):
 
 class ProximityZoneDialog(QDialog):
     def __init__(self, anchor_id: int, zone_num: int = 1, dist_in: float = 1.0, dist_out: float = 0.0,
-                 bound: bool = False, halls: str = "", blist: str = "", parent=None):
+                 bound: bool = False, halls: str = "", blist: str = "", audio_data=None, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Зона по приближению")
         layout = QVBoxLayout(self)
@@ -887,6 +887,9 @@ class ProximityZoneDialog(QDialog):
         self.blist_edit.setPlaceholderText("Например: 1, 3, 10")
         form.addRow("Чёрный список", self.blist_edit)
 
+        self.audio_widget = AudioTrackWidget(self, audio_data)
+        layout.addWidget(self.audio_widget)
+
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -911,7 +914,8 @@ class ProximityZoneDialog(QDialog):
             'dist_out': round(self.dist_out_spin.value(), 1),
             'bound': self.bound_box.isChecked(),
             'halls': self._parse_numbers(self.halls_edit.text()),
-            'blist': self._parse_numbers(self.blist_edit.text())
+            'blist': self._parse_numbers(self.blist_edit.text()),
+            'audio': copy.deepcopy(self.audio_widget.get_data())
         }
 
 # ---------------------------------------------------------------------------
@@ -1466,7 +1470,8 @@ class RectZoneItem(QGraphicsRectItem):
 
 class ProximityZoneItem(QGraphicsItem):
     def __init__(self, anchor: AnchorItem, zone_num: int, dist_in: float, dist_out: float,
-                 bound: bool = False, halls: list[int] | None = None, blist: list[int] | None = None):
+                 bound: bool = False, halls: list[int] | None = None, blist: list[int] | None = None,
+                 audio: dict | None = None):
         super().__init__(anchor)
         self.anchor = anchor
         self.zone_num = zone_num
@@ -1475,6 +1480,7 @@ class ProximityZoneItem(QGraphicsItem):
         self.bound = bool(bound)
         self.halls = halls or []
         self.blacklist = blist or []
+        self.audio_info = copy.deepcopy(audio) if audio else None
         self.tree_item = None
         self.setFlag(QGraphicsItem.ItemIsSelectable, True)
         self.update_zvalue()
@@ -1564,6 +1570,7 @@ class ProximityZoneItem(QGraphicsItem):
             bound=self.bound,
             halls=self._default_halls_text(),
             blist=", ".join(str(x) for x in self.blacklist),
+            audio_data=self.audio_info,
             parent=mw,
         )
         if dlg.exec() != QDialog.Accepted:
@@ -1578,6 +1585,10 @@ class ProximityZoneItem(QGraphicsItem):
         menu = QMenu()
         header = menu.addAction(f"Зона {self.zone_num} — якорь {self.anchor.number}")
         header.setEnabled(False)
+        audio_line = format_audio_menu_line(self.audio_info)
+        if audio_line:
+            track_action = menu.addAction(audio_line)
+            track_action.setEnabled(False)
         edit = menu.addAction("Редактировать")
         delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
@@ -1594,6 +1605,7 @@ class ProximityZoneItem(QGraphicsItem):
             self.bound = values['bound']
             self.halls = values['halls']
             self.blacklist = values['blist']
+            self.audio_info = copy.deepcopy(values.get('audio')) if values.get('audio') else None
             self.update_zvalue()
             mw.populate_tree()
             mw.push_undo_state(prev_state)
@@ -1850,6 +1862,7 @@ class PlanGraphicsScene(QGraphicsScene):
                     values['bound'],
                     values['halls'],
                     values['blist'],
+                    values.get('audio'),
                 )
                 mw.proximity_zones.append(zone)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree(); mw.push_undo_state(prev_state)
@@ -2608,6 +2621,7 @@ class PlanEditorMainWindow(QMainWindow):
                 "bound": zone.bound,
                 "halls": list(zone.halls),
                 "blacklist": list(zone.blacklist),
+                "audio": copy.deepcopy(zone.audio_info) if zone.audio_info else None,
             }
             data["proximity_zones"].append(zone_data)
         return data
@@ -2694,6 +2708,7 @@ class PlanEditorMainWindow(QMainWindow):
                     bool(zone_data.get("bound", False)),
                     list(zone_data.get("halls", [])),
                     list(zone_data.get("blacklist", [])),
+                    copy.deepcopy(zone_data.get("audio")) if zone_data.get("audio") else None,
                 )
                 self.proximity_zones.append(zone)
             if not image_data:
@@ -3146,6 +3161,7 @@ class PlanEditorMainWindow(QMainWindow):
                 "bound": z.bound,
                 "halls": z.halls,
                 "blacklist": z.blacklist,
+                "audio": copy.deepcopy(z.audio_info) if z.audio_info else None,
             }
             data["proximity_zones"].append(zd)
         return data
@@ -3444,14 +3460,19 @@ class PlanEditorMainWindow(QMainWindow):
 
         prev_state = self.capture_state()
         hall_map = {h.number: h for h in self.halls}
-        had_audio = any(h.audio_settings or h.zone_audio_tracks for h in self.halls)
+        had_audio = any(h.audio_settings or h.zone_audio_tracks for h in self.halls) or any(pz.audio_info for pz in self.proximity_zones)
         for hall in self.halls:
             hall.audio_settings = None
             hall.zone_audio_tracks.clear()
+        for pz in self.proximity_zones:
+            pz.audio_info = None
 
         changed = had_audio
         unmatched_halls: set[int] = set()
         unmatched_zones: set[int] = set()
+        proximity_by_id: dict[int, list[ProximityZoneItem]] = {}
+        for pz in self.proximity_zones:
+            proximity_by_id.setdefault(pz.zone_num, []).append(pz)
 
         for entry in tracks:
             if not isinstance(entry, dict):
@@ -3476,15 +3497,34 @@ class PlanEditorMainWindow(QMainWindow):
                 target_hall.audio_settings = audio_info
                 changed = True
                 continue
-            if target_hall is None:
-                possible = [h for h in self.halls if any(isinstance(ch, RectZoneItem) and ch.zone_num == track_id for ch in h.childItems())]
-                if len(possible) == 1:
-                    target_hall = possible[0]
-                else:
-                    unmatched_zones.add(track_id)
-                    continue
-            target_hall.zone_audio_tracks[track_id] = audio_info
-            changed = True
+            candidates = [h for h in self.halls if any(isinstance(ch, RectZoneItem) and ch.zone_num == track_id for ch in h.childItems())]
+            if target_hall is not None:
+                candidates = [h for h in candidates if h is target_hall]
+
+            assigned = False
+            if len(candidates) == 1:
+                candidates[0].zone_audio_tracks[track_id] = audio_info
+                assigned = True
+            else:
+                prox_candidates = proximity_by_id.get(track_id, [])
+                if target_hall is not None:
+                    prox_candidates = [
+                        pz for pz in prox_candidates
+                        if target_hall.number in (pz.halls or ([pz.anchor.main_hall_number] if pz.anchor else []))
+                    ]
+                elif isinstance(room_id, (int, float)):
+                    prox_candidates = [
+                        pz for pz in prox_candidates
+                        if int(room_id) in (pz.halls or ([pz.anchor.main_hall_number] if pz.anchor else []))
+                    ]
+                if len(prox_candidates) == 1:
+                    prox_candidates[0].audio_info = audio_info
+                    assigned = True
+
+            if assigned:
+                changed = True
+            else:
+                unmatched_zones.add(track_id)
 
         warnings = []
         if unmatched_halls:
@@ -3574,6 +3614,7 @@ class PlanEditorMainWindow(QMainWindow):
                 bool(zd.get("bound", False)),
                 list(zd.get("halls", [])),
                 list(zd.get("blacklist", [])),
+                copy.deepcopy(zd.get("audio")) if zd.get("audio") else None,
             )
             self.proximity_zones.append(zone)
         self.apply_lock_flags(); self.populate_tree()
@@ -3801,6 +3842,15 @@ class PlanEditorMainWindow(QMainWindow):
                     continue
                 collect_audio_files(audio_info)
                 register_track_entry(create_track_entry(audio_info, h.number, False))
+
+        for pz in self.proximity_zones:
+            if not pz.audio_info:
+                continue
+            halls = pz.halls or ([] if not pz.anchor else [pz.anchor.main_hall_number])
+            hall_numbers = [h for h in halls if isinstance(h, int)]
+            room_id = min(hall_numbers) if hall_numbers else (pz.anchor.main_hall_number if pz.anchor else 0)
+            collect_audio_files(pz.audio_info)
+            register_track_entry(create_track_entry(pz.audio_info, room_id if room_id is not None else 0, False))
 
         rooms_strs = []
         for room in config["rooms"]:
