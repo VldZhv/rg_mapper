@@ -842,6 +842,78 @@ class ZoneEditDialog(QDialog):
             self.audio_widget.setEnabled(False)
             self._audio_controls_enabled = False
 
+
+class ProximityZoneDialog(QDialog):
+    def __init__(self, anchor_id: int, zone_num: int = 1, dist_in: float = 1.0, dist_out: float = 0.0,
+                 bound: bool = False, halls: str = "", blist: str = "", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Зона по приближению")
+        layout = QVBoxLayout(self)
+
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        anchor_label = QLabel(str(anchor_id))
+        form.addRow("Якорь", anchor_label)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(zone_num)
+        form.addRow("Номер зоны", self.num_spin)
+
+        self.dist_in_spin = QDoubleSpinBox()
+        self.dist_in_spin.setDecimals(1)
+        self.dist_in_spin.setSingleStep(0.1)
+        self.dist_in_spin.setRange(0.0, 1000.0)
+        self.dist_in_spin.setValue(max(0.0, dist_in))
+        form.addRow("Дистанция входа (м)", self.dist_in_spin)
+
+        self.dist_out_spin = QDoubleSpinBox()
+        self.dist_out_spin.setDecimals(1)
+        self.dist_out_spin.setSingleStep(0.1)
+        self.dist_out_spin.setRange(0.0, 1000.0)
+        self.dist_out_spin.setValue(max(0.0, dist_out))
+        form.addRow("Дистанция выхода (м)", self.dist_out_spin)
+
+        self.bound_box = QCheckBox("Переходная зона")
+        self.bound_box.setChecked(bool(bound))
+        form.addRow(self.bound_box)
+
+        self.halls_edit = QLineEdit(halls)
+        self.halls_edit.setPlaceholderText("Например: 1, 2, 5")
+        form.addRow("Залы", self.halls_edit)
+
+        self.blist_edit = QLineEdit(blist)
+        self.blist_edit.setPlaceholderText("Например: 1, 3, 10")
+        form.addRow("Чёрный список", self.blist_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _parse_numbers(self, text: str) -> list[int]:
+        values: list[int] = []
+        for token in text.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                values.append(int(token))
+            except ValueError:
+                continue
+        return values
+
+    def values(self) -> dict:
+        return {
+            'zone_num': self.num_spin.value(),
+            'dist_in': round(self.dist_in_spin.value(), 1),
+            'dist_out': round(self.dist_out_spin.value(), 1),
+            'bound': self.bound_box.isChecked(),
+            'halls': self._parse_numbers(self.halls_edit.text()),
+            'blist': self._parse_numbers(self.blist_edit.text())
+        }
+
 # ---------------------------------------------------------------------------
 # HallItem
 # ---------------------------------------------------------------------------
@@ -1159,6 +1231,10 @@ class AnchorItem(QGraphicsEllipseItem):
             if confirm != QMessageBox.Yes:
                 return
             prev_state = mw.capture_state()
+            for zone in list(getattr(mw, 'proximity_zones', [])):
+                if zone.anchor is self:
+                    mw.proximity_zones.remove(zone)
+                    zone.scene().removeItem(zone)
             mw.anchors.remove(self); self.scene().removeItem(self)
             mw.last_selected_items = []; mw.populate_tree()
             mw.push_undo_state(prev_state)
@@ -1385,6 +1461,148 @@ class RectZoneItem(QGraphicsRectItem):
         event.accept()
 
 
+class ProximityZoneItem(QGraphicsItem):
+    def __init__(self, anchor: AnchorItem, zone_num: int, dist_in: float, dist_out: float,
+                 bound: bool = False, halls: list[int] | None = None, blist: list[int] | None = None):
+        super().__init__(anchor)
+        self.anchor = anchor
+        self.zone_num = zone_num
+        self.dist_in = max(0.0, dist_in)
+        self.dist_out = max(0.0, dist_out)
+        self.bound = bool(bound)
+        self.halls = halls or []
+        self.blacklist = blist or []
+        self.tree_item = None
+        self.setFlag(QGraphicsItem.ItemIsSelectable, True)
+        self.update_zvalue()
+
+    def _radius_px(self, meters: float) -> float:
+        if not self.scene():
+            return 0.0
+        return max(0.0, meters * self.scene().pixel_per_cm_x * 100)
+
+    def boundingRect(self):
+        r = max(self._radius_px(self.dist_in), self._radius_px(self.dist_out))
+        return QRectF(-r, -r, r * 2, r * 2)
+
+    def shape(self):
+        path = QPainterPath()
+        r = max(self._radius_px(self.dist_in), self._radius_px(self.dist_out))
+        if r <= 0:
+            return path
+        path.addEllipse(self.boundingRect())
+        return path
+
+    def paint(self, painter, option, widget=None):
+        if not self.scene():
+            return
+        painter.save()
+        r_in = self._radius_px(self.dist_in)
+        r_out = self._radius_px(self.dist_out)
+        if self.bound:
+            color_in = QColor(*RectZoneItem._ZONE_RGB["Переходная"])
+            color_out = QColor(*RectZoneItem._ZONE_RGB["Переходная"])
+        else:
+            color_in = QColor(*RectZoneItem._ZONE_RGB["Входная зона"])
+            color_out = QColor(*RectZoneItem._ZONE_RGB["Выходная зона"])
+
+        if r_in > 0:
+            pen = QPen(color_in, 2)
+            painter.setPen(pen)
+            painter.drawEllipse(QPointF(0, 0), r_in, r_in)
+        if r_out > 0:
+            pen = QPen(color_out, 2)
+            painter.setPen(pen)
+            painter.drawEllipse(QPointF(0, 0), r_out, r_out)
+
+        font = QFont()
+        font.setBold(True)
+        painter.setFont(font)
+        outline = QColor(180, 180, 180)
+        text_pos = QPointF(-self.boundingRect().width() / 2 + 2, -self.boundingRect().height() / 2 - 4)
+        path = QPainterPath()
+        path.addText(text_pos, font, str(self.zone_num))
+        painter.setPen(QPen(outline, 2))
+        painter.drawPath(path)
+        painter.fillPath(path, color_in if r_in > 0 else color_out)
+        painter.restore()
+
+    def update_zvalue(self):
+        anchor_number = float(self.anchor.number) if isinstance(self.anchor.number, (int, float)) else 0.0
+        zone_number = float(self.zone_num) if isinstance(self.zone_num, (int, float)) else 0.0
+        self.setZValue(8000.0 + anchor_number * 0.1 + zone_number * 0.001)
+
+    def _default_halls_text(self) -> str:
+        return ", ".join(str(h) for h in self.halls)
+
+    def _open_edit_dialog(self, mw):
+        dlg = ProximityZoneDialog(
+            anchor_id=self.anchor.number,
+            zone_num=self.zone_num,
+            dist_in=self.dist_in,
+            dist_out=self.dist_out,
+            bound=self.bound,
+            halls=self._default_halls_text(),
+            blist=", ".join(str(x) for x in self.blacklist),
+            parent=mw,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        return dlg.values()
+
+    def open_menu(self, global_pos: QPoint):
+        scene = self.scene()
+        mw = scene.mainwindow if scene else None
+        if not mw:
+            return
+        menu = QMenu()
+        header = menu.addAction(f"Зона {self.zone_num} — якорь {self.anchor.number}")
+        header.setEnabled(False)
+        edit = menu.addAction("Редактировать")
+        delete = menu.addAction("Удалить")
+        act = menu.exec(global_pos)
+        if act == edit:
+            prev_state = mw.capture_state()
+            values = self._open_edit_dialog(mw)
+            if values is None:
+                return
+            if not values['halls'] and self.anchor and self.anchor.main_hall_number is not None:
+                values['halls'] = [self.anchor.main_hall_number]
+            self.zone_num = values['zone_num']
+            self.dist_in = values['dist_in']
+            self.dist_out = values['dist_out']
+            self.bound = values['bound']
+            self.halls = values['halls']
+            self.blacklist = values['blist']
+            self.update_zvalue()
+            mw.populate_tree()
+            mw.push_undo_state(prev_state)
+            self.update()
+        elif act == delete:
+            confirm = QMessageBox.question(
+                mw,
+                "Подтвердить",
+                f"Удалить зону {self.zone_num}, привязанную к якорю {self.anchor.number}?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if confirm != QMessageBox.Yes:
+                return
+            prev_state = mw.capture_state()
+            mw.proximity_zones.remove(self)
+            scene.removeItem(self)
+            mw.populate_tree()
+            mw.push_undo_state(prev_state)
+
+    def mouseDoubleClickEvent(self, event):
+        scene = self.scene()
+        mw = scene.mainwindow if scene else None
+        if mw:
+            self.open_menu(event.screenPos())
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 def _zone_area(zone):
     rect = zone.boundingRect()
     return abs(rect.width() * rect.height())
@@ -1404,7 +1622,7 @@ def _smallest_zone(scene, pos, exclude=None, max_area=None):
     best = None
     best_area = None
     for item in scene.items(pos, Qt.IntersectsItemShape):
-        if isinstance(item, RectZoneItem) and item is not exclude:
+        if isinstance(item, (RectZoneItem, ProximityZoneItem)) and item is not exclude:
             rect = item.boundingRect()
             area = abs(rect.width() * rect.height())
             if max_area is not None and area >= max_area:
@@ -1575,6 +1793,30 @@ class PlanGraphicsScene(QGraphicsScene):
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
                 mw.push_undo_state(prev_state)
+                return
+            if m == "proximity_zone":
+                anchor = _top_anchor(self, pos)
+                if not anchor:
+                    QMessageBox.warning(mw, "Ошибка", "Укажите существующий якорь для зоны.")
+                    mw.add_mode=None; mw.statusBar().clearMessage(); return
+                params = mw.get_proximity_zone_parameters(anchor)
+                if not params:
+                    mw.add_mode=None; mw.statusBar().clearMessage(); return
+                prev_state = mw.capture_state()
+                values = params
+                if not values['halls'] and anchor.main_hall_number is not None:
+                    values['halls'] = [anchor.main_hall_number]
+                zone = ProximityZoneItem(
+                    anchor,
+                    values['zone_num'],
+                    values['dist_in'],
+                    values['dist_out'],
+                    values['bound'],
+                    values['halls'],
+                    values['blist'],
+                )
+                mw.proximity_zones.append(zone)
+                mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree(); mw.push_undo_state(prev_state)
                 return
         super().mousePressEvent(event)
 
@@ -1842,7 +2084,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         self.add_mode = None; self.temp_start_point = None
         self.current_hall_for_zone = None
-        self.halls = []; self.anchors = []
+        self.halls = []; self.anchors = []; self.proximity_zones = []
         self.grid_calibrated = False
         self.lock_halls = False; self.lock_zones = False; self.lock_anchors = False
         self.last_selected_items = []
@@ -1957,6 +2199,13 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_add_zone.triggered.connect(lambda: self.set_mode("zone"))
 
+        self.action_add_proximity_zone = QAction(
+            load_icon("zone.png", QStyle.SP_FileDialogNewFolder),
+            "Добавить зону по приближению",
+            self,
+        )
+        self.action_add_proximity_zone.triggered.connect(lambda: self.set_mode("proximity_zone"))
+
         self.act_lock = QAction(
             load_icon("lock.png", QStyle.SP_DialogCloseButton),
             "Закрепить объекты",
@@ -2014,6 +2263,7 @@ class PlanEditorMainWindow(QMainWindow):
         tools_menu.addAction(self.action_add_hall)
         tools_menu.addAction(self.action_add_anchor)
         tools_menu.addAction(self.action_add_zone)
+        tools_menu.addAction(self.action_add_proximity_zone)
 
         view_menu = menu_bar.addMenu("Вид")
         view_menu.addAction(self.action_toggle_objects_dock)
@@ -2071,6 +2321,7 @@ class PlanEditorMainWindow(QMainWindow):
         tools_toolbar.addAction(self.action_add_hall)
         tools_toolbar.addAction(self.action_add_anchor)
         tools_toolbar.addAction(self.action_add_zone)
+        tools_toolbar.addAction(self.action_add_proximity_zone)
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.act_lock)
         self._add_toolbar_group_separator(tools_toolbar)
@@ -2260,7 +2511,8 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_anchors": self.lock_anchors,
             "current_project_file": self.current_project_file,
             "halls": [],
-            "anchors": []
+            "anchors": [],
+            "proximity_zones": [],
         }
         if self.scene.pixmap:
             cache_key = self.scene.pixmap.cacheKey()
@@ -2311,6 +2563,17 @@ class PlanEditorMainWindow(QMainWindow):
                 "bound": anchor.bound
             }
             data["anchors"].append(anchor_data)
+        for zone in self.proximity_zones:
+            zone_data = {
+                "zone_num": zone.zone_num,
+                "anchor_id": zone.anchor.number,
+                "dist_in": zone.dist_in,
+                "dist_out": zone.dist_out,
+                "bound": zone.bound,
+                "halls": list(zone.halls),
+                "blacklist": list(zone.blacklist),
+            }
+            data["proximity_zones"].append(zone_data)
         return data
 
     def restore_state(self, state):
@@ -2322,6 +2585,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.scene.temp_item = None
             self.halls.clear()
             self.anchors.clear()
+            self.proximity_zones.clear()
             image_data = state.get("image_data") or ""
             if image_data:
                 ba = QByteArray.fromBase64(image_data.encode())
@@ -2366,6 +2630,7 @@ class PlanEditorMainWindow(QMainWindow):
                         zone_data.get("zone_angle", 0.0),
                         hall
                     )
+            anchor_map = {}
             for anchor_data in state.get("anchors", []):
                 anchor = AnchorItem(
                     anchor_data.get("x", 0.0),
@@ -2379,6 +2644,21 @@ class PlanEditorMainWindow(QMainWindow):
                 anchor.bound = bool(anchor_data.get("bound", False))
                 self.scene.addItem(anchor)
                 self.anchors.append(anchor)
+                anchor_map[anchor.number] = anchor
+            for zone_data in state.get("proximity_zones", []):
+                anchor = anchor_map.get(zone_data.get("anchor_id"))
+                if not anchor:
+                    continue
+                zone = ProximityZoneItem(
+                    anchor,
+                    zone_data.get("zone_num", 0),
+                    float(zone_data.get("dist_in", 0.0)),
+                    float(zone_data.get("dist_out", 0.0)),
+                    bool(zone_data.get("bound", False)),
+                    list(zone_data.get("halls", [])),
+                    list(zone_data.get("blacklist", [])),
+                )
+                self.proximity_zones.append(zone)
             if not image_data:
                 rect = self.scene.itemsBoundingRect()
                 if rect.isValid():
@@ -2426,6 +2706,14 @@ class PlanEditorMainWindow(QMainWindow):
             zs = [ch for ch in self.current_hall_for_zone.childItems() if isinstance(ch,RectZoneItem)]
             if zs: default = max(z.zone_num for z in zs)+1
         return getZoneParameters(default, "Входная зона", 0)
+
+    def get_proximity_zone_parameters(self, anchor: AnchorItem):
+        default = 1 if not self.proximity_zones else max(z.zone_num for z in self.proximity_zones)+1
+        halls_text = str(anchor.main_hall_number) if anchor.main_hall_number is not None else ""
+        dlg = ProximityZoneDialog(anchor.number, default, 1.0, 0.0, anchor.bound, halls_text, "", self)
+        if dlg.exec() == QDialog.Accepted:
+            return dlg.values()
+        return None
 
     # Locking
     def lock_objects(self):
@@ -2543,6 +2831,10 @@ class PlanEditorMainWindow(QMainWindow):
                 act = menu.addAction(label)
                 act.triggered.connect(lambda checked=False, z=z: z.open_menu(global_pos))
             menu.exec(global_pos)
+        elif tp == "proximity_zone":
+            zone = data.get("ref")
+            if zone and hasattr(zone, 'open_menu'):
+                zone.open_menu(global_pos)
 
     # Misc
     def handle_wheel_event(self, event):
@@ -2567,7 +2859,14 @@ class PlanEditorMainWindow(QMainWindow):
                     self.halls.remove(it)
                     changed = True
                 elif isinstance(it, AnchorItem) and it in self.anchors:
+                    for zone in list(self.proximity_zones):
+                        if zone.anchor is it:
+                            self.proximity_zones.remove(zone)
+                            self.scene.removeItem(zone)
                     self.anchors.remove(it)
+                    changed = True
+                elif isinstance(it, ProximityZoneItem) and it in self.proximity_zones:
+                    self.proximity_zones.remove(it)
                     changed = True
                 else:
                     changed = changed or isinstance(it, RectZoneItem)
@@ -2607,6 +2906,18 @@ class PlanEditorMainWindow(QMainWindow):
                     ai = QTreeWidgetItem([at]); a.tree_item = ai; hi.addChild(ai)
                     ai.setData(0, Qt.UserRole, {"type":"anchor","ref":a})
 
+            for z in self.proximity_zones:
+                halls = z.halls or ([z.anchor.main_hall_number] if z.anchor else [])
+                if h.number not in halls:
+                    continue
+                info = f"Зона {z.zone_num} (якорь {z.anchor.number}, вход {z.dist_in} м, выход {z.dist_out} м)"
+                if z.bound:
+                    info += " [переходная]"
+                if z.blacklist:
+                    info += f"; ЧС: {', '.join(str(x) for x in z.blacklist)}"
+                zi = QTreeWidgetItem([info]); z.tree_item = zi; hi.addChild(zi)
+                zi.setData(0, Qt.UserRole, {"type": "proximity_zone", "ref": z})
+
             # zones grouped by num
             zones_by_num = {}
             for ch in h.childItems():
@@ -2643,7 +2954,13 @@ class PlanEditorMainWindow(QMainWindow):
         if not self.grid_calibrated and mode!="calibrate":
             QMessageBox.information(self,"Внимание","Сначала выполните калибровку!"); return
         self.add_mode = mode; self.temp_start_point = None; self.current_hall_for_zone = None
-        msgs = {"hall":"Выделите зал.","anchor":"Кликните в зал.","zone":"Выделите зону.","calibrate":"Укажите 2 точки."}
+        msgs = {
+            "hall":"Выделите зал.",
+            "anchor":"Кликните в зал.",
+            "zone":"Выделите зону.",
+            "proximity_zone": "Укажите якорь для привязки зоны.",
+            "calibrate":"Укажите 2 точки."
+        }
         self.statusBar().showMessage(msgs.get(mode,""))
 
     def _has_active_project(self) -> bool:
@@ -2723,7 +3040,7 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.warning(self, "Ошибка", "Не удалось загрузить.")
             return
         prev_state = self.capture_state()
-        self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.clear(); self.halls.clear(); self.anchors.clear(); self.proximity_zones.clear()
         self.scene.pixmap = None
         self._reset_background_cache()
         self.scene.set_background_image(pix)
@@ -2748,7 +3065,7 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_halls": self.lock_halls,
             "lock_zones": self.lock_zones,
             "lock_anchors": self.lock_anchors,
-            "halls": [], "anchors": []
+            "halls": [], "anchors": [], "proximity_zones": []
         }
         for h in self.halls:
             hd = {
@@ -2782,6 +3099,17 @@ class PlanEditorMainWindow(QMainWindow):
             }
             if a.bound: ad["bound"] = True
             data["anchors"].append(ad)
+        for z in self.proximity_zones:
+            zd = {
+                "zone_num": z.zone_num,
+                "anchor_id": z.anchor.number,
+                "dist_in": z.dist_in,
+                "dist_out": z.dist_out,
+                "bound": z.bound,
+                "halls": z.halls,
+                "blacklist": z.blacklist,
+            }
+            data["proximity_zones"].append(zd)
         return data
 
     def _save_project_file(self, fp, data):
@@ -3146,7 +3474,7 @@ class PlanEditorMainWindow(QMainWindow):
                 data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self,"Ошибка",f"Ошибка чтения:\n{e}"); return
-        self.scene.clear(); self.halls.clear(); self.anchors.clear()
+        self.scene.clear(); self.halls.clear(); self.anchors.clear(); self.proximity_zones.clear()
         self.scene.pixmap = None
         self._reset_background_cache()
         buf_data = data.get("image_data","")
@@ -3181,6 +3509,7 @@ class PlanEditorMainWindow(QMainWindow):
                     zd.get("zone_type","Входная зона"),
                     zd.get("zone_angle",0), h
                 )
+        anchor_map = {}
         for ad in data.get("anchors",[]):
             a = AnchorItem(
                 ad.get("x",0), ad.get("y",0),
@@ -3191,7 +3520,21 @@ class PlanEditorMainWindow(QMainWindow):
             a.z = ad.get("z",0)
             a.extra_halls = ad.get("extra_halls",[])
             if ad.get("bound"): a.bound = True
-            self.scene.addItem(a); self.anchors.append(a)
+            self.scene.addItem(a); self.anchors.append(a); anchor_map[a.number] = a
+        for zd in data.get("proximity_zones", []):
+            anchor = anchor_map.get(zd.get("anchor_id"))
+            if not anchor:
+                continue
+            zone = ProximityZoneItem(
+                anchor,
+                zd.get("zone_num", 0),
+                float(zd.get("dist_in", 0.0)),
+                float(zd.get("dist_out", 0.0)),
+                bool(zd.get("bound", False)),
+                list(zd.get("halls", [])),
+                list(zd.get("blacklist", [])),
+            )
+            self.proximity_zones.append(zone)
         self.apply_lock_flags(); self.populate_tree()
         self.current_project_file = fp
         QMessageBox.information(self,"Загружено","Проект загружен.")
@@ -3387,6 +3730,25 @@ class PlanEditorMainWindow(QMainWindow):
             for z in zones.values():
                 room["zones"].append(z)
 
+            for pz in self.proximity_zones:
+                if not pz.anchor:
+                    continue
+                halls = pz.halls or ([pz.anchor.main_hall_number] if pz.anchor else [])
+                if h.number not in halls:
+                    continue
+                pz_entry = {
+                    "num": pz.zone_num,
+                    "anch_zone": True,
+                    "anchor_id": pz.anchor.number if pz.anchor else None,
+                    "dist_in": fix_negative_zero(round(pz.dist_in, 1)),
+                    "dist_out": fix_negative_zero(round(pz.dist_out, 1)),
+                }
+                if pz.bound:
+                    pz_entry["bound"] = True
+                if pz.blacklist:
+                    pz_entry["blist"] = list(pz.blacklist)
+                room["zones"].append(pz_entry)
+
             config["rooms"].append(room)
 
             if h.audio_settings:
@@ -3419,21 +3781,34 @@ class PlanEditorMainWindow(QMainWindow):
             lines.append('"zones": [')
             zlines = []
             for z in room["zones"]:
-                zl = "{"
-                zl += f'\n"num": {z["num"]},'
-                zl += (
-                    f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
-                    f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
-                    f'"angle": {z["enter"]["angle"]} }},'
-                )
-                zl += (
-                    f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
-                    f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
-                    f'"angle": {z["exit"]["angle"]} }}'
-                )
-                if z.get("bound"):
-                    zl += ',\n"bound": true'
-                zl += "\n}"
+                if z.get("anch_zone"):
+                    zl = "{"
+                    zl += f'\n"num": {z.get("num", 0)},'
+                    zl += f'\n"anch_zone": true,'
+                    zl += f'\n"anchor_id": {z.get("anchor_id", 0)},'
+                    zl += f'\n"dist_in": {z.get("dist_in", 0)},'
+                    zl += f'\n"dist_out": {z.get("dist_out", 0)}'
+                    if z.get("bound"):
+                        zl += ',\n"bound": true'
+                    if z.get("blist"):
+                        zl += f',\n"blist": {json.dumps(z.get("blist"))}'
+                    zl += "\n}"
+                else:
+                    zl = "{"
+                    zl += f'\n"num": {z["num"]},'
+                    zl += (
+                        f'\n"enter": {{ "x": {z["enter"]["x"]}, "y": {z["enter"]["y"]}, '
+                        f'"w": {z["enter"]["w"]}, "h": {z["enter"]["h"]}, '
+                        f'"angle": {z["enter"]["angle"]} }},'
+                    )
+                    zl += (
+                        f'\n"exit":  {{ "x": {z["exit"]["x"]}, "y": {z["exit"]["y"]}, '
+                        f'"w": {z["exit"]["w"]}, "h": {z["exit"]["h"]}, '
+                        f'"angle": {z["exit"]["angle"]} }}'
+                    )
+                    if z.get("bound"):
+                        zl += ',\n"bound": true'
+                    zl += "\n}"
                 zlines.append(zl)
             lines.append(",\n".join(zlines))
             lines.append("]")
