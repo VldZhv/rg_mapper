@@ -1099,7 +1099,9 @@ class AnchorItem(QGraphicsEllipseItem):
         r = 3
         super().__init__(-r,-r,2*r,2*r)
         self.setPos(x,y); self.number = number; self.z = 0
-        self.main_hall_number = main_hall_number; self.extra_halls = []; self.bound = False
+        self.main_hall_number = main_hall_number; self.extra_halls = []
+        self.bound = False
+        self.bound_explicit = False
         self.setPen(QPen(QColor(255,0,0),2)); self.setBrush(QBrush(QColor(255,0,0)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
@@ -1213,6 +1215,7 @@ class AnchorItem(QGraphicsEllipseItem):
                 self.number = v["Номер якоря"]
                 x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
                 self.bound = v["Переходный"]
+                self.bound_explicit = self.bound
                 self.extra_halls = [int(tok) for tok in v["Доп. залы"].split(",") if tok.strip().isdigit()]
                 self.z = int(round(z2*100))
                 px = x2 * ppcm * 100
@@ -1506,6 +1509,14 @@ class ProximityZoneItem(QGraphicsItem):
             color_in = QColor(*RectZoneItem._ZONE_RGB["Входная зона"])
             color_out = QColor(*RectZoneItem._ZONE_RGB["Выходная зона"])
 
+        fill_radius = max(r_in, r_out)
+        if fill_radius > 0:
+            fill_color = QColor(color_out)
+            fill_color.setAlpha(50)
+            painter.setBrush(QBrush(fill_color))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(QPointF(0, 0), fill_radius, fill_radius)
+
         if r_in > 0:
             pen = QPen(color_in, 2)
             painter.setPen(pen)
@@ -1593,7 +1604,16 @@ class ProximityZoneItem(QGraphicsItem):
             mw.populate_tree()
             mw.push_undo_state(prev_state)
 
+    def _hit_anchor(self, event) -> bool:
+        if not self.anchor:
+            return False
+        anchor_pos = self.mapToParent(event.pos())
+        return self.anchor.shape().contains(anchor_pos)
+
     def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self._hit_anchor(event):
+            event.ignore()
+            return
         scene = self.scene()
         mw = scene.mainwindow if scene else None
         if mw:
@@ -1601,6 +1621,12 @@ class ProximityZoneItem(QGraphicsItem):
             event.accept()
             return
         super().mouseDoubleClickEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._hit_anchor(event):
+            event.ignore()
+            return
+        super().mousePressEvent(event)
 
 
 def _zone_area(zone):
@@ -1790,6 +1816,7 @@ class PlanGraphicsScene(QGraphicsScene):
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
                 a.z = int(round(z_m * 100))       # храним в см
                 a.extra_halls, a.bound = extras, bound
+                a.bound_explicit = bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
                 mw.push_undo_state(prev_state)
@@ -2560,7 +2587,7 @@ class PlanEditorMainWindow(QMainWindow):
                 "y": anchor.scenePos().y(),
                 "main_hall": anchor.main_hall_number,
                 "extra_halls": list(anchor.extra_halls),
-                "bound": anchor.bound
+                "bound": anchor.bound_explicit
             }
             data["anchors"].append(anchor_data)
         for zone in self.proximity_zones:
@@ -2642,6 +2669,7 @@ class PlanEditorMainWindow(QMainWindow):
                 anchor.z = anchor_data.get("z", 0)
                 anchor.extra_halls = list(anchor_data.get("extra_halls", []))
                 anchor.bound = bool(anchor_data.get("bound", False))
+                anchor.bound_explicit = anchor.bound
                 self.scene.addItem(anchor)
                 self.anchors.append(anchor)
                 anchor_map[anchor.number] = anchor
@@ -2710,7 +2738,7 @@ class PlanEditorMainWindow(QMainWindow):
     def get_proximity_zone_parameters(self, anchor: AnchorItem):
         default = 1 if not self.proximity_zones else max(z.zone_num for z in self.proximity_zones)+1
         halls_text = str(anchor.main_hall_number) if anchor.main_hall_number is not None else ""
-        dlg = ProximityZoneDialog(anchor.number, default, 1.0, 0.0, anchor.bound, halls_text, "", self)
+        dlg = ProximityZoneDialog(anchor.number, default, 1.0, 0.0, anchor.bound_explicit, halls_text, "", self)
         if dlg.exec() == QDialog.Accepted:
             return dlg.values()
         return None
@@ -3097,7 +3125,8 @@ class PlanEditorMainWindow(QMainWindow):
                 "main_hall": a.main_hall_number,
                 "extra_halls": a.extra_halls
             }
-            if a.bound: ad["bound"] = True
+            if a.bound_explicit:
+                ad["bound"] = True
             data["anchors"].append(ad)
         for z in self.proximity_zones:
             zd = {
@@ -3296,6 +3325,7 @@ class PlanEditorMainWindow(QMainWindow):
                 anchor_item.z = int(round(z_m * 100))
                 if anchor_data.get("bound"):
                     anchor_item.bound = True
+                    anchor_item.bound_explicit = True
                 self.scene.addItem(anchor_item)
                 self.anchors.append(anchor_item)
                 changed = True
@@ -3519,7 +3549,9 @@ class PlanEditorMainWindow(QMainWindow):
             )
             a.z = ad.get("z",0)
             a.extra_halls = ad.get("extra_halls",[])
-            if ad.get("bound"): a.bound = True
+            if ad.get("bound"):
+                a.bound = True
+                a.bound_explicit = True
             self.scene.addItem(a); self.anchors.append(a); anchor_map[a.number] = a
         for zd in data.get("proximity_zones", []):
             anchor = anchor_map.get(zd.get("anchor_id"))
@@ -3707,7 +3739,7 @@ class PlanEditorMainWindow(QMainWindow):
                     xm = fix_negative_zero(round(lp.x() / (self.scene.pixel_per_cm_x * 100), 1))
                     ym = fix_negative_zero(round((h.rect().height() - lp.y()) / (self.scene.pixel_per_cm_x * 100), 1))
                     ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
-                    if a.bound:
+                    if a.bound_explicit:
                         ae["bound"] = True
                     room["anchors"].append(ae)
 
