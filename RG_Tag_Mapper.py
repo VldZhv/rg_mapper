@@ -2022,7 +2022,9 @@ class PlanGraphicsScene(QGraphicsScene):
 class PlanEditorMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RG Tags Mapper"); self.resize(1200,800)
+        self.project_name: str = ""
+        self._update_window_title()
+        self.resize(1200,800)
 
         self._icons_dir = os.path.join(os.path.dirname(__file__), "icons")
         self._apply_app_icon()
@@ -2221,6 +2223,14 @@ class PlanEditorMainWindow(QMainWindow):
                 return f"{sanitized}_{timestamp}"
         return timestamp
 
+    def _update_window_title(self):
+        base_title = "RG Tags Mapper"
+        name = self.project_name.strip()
+        if name:
+            self.setWindowTitle(f"{base_title} — {name}")
+        else:
+            self.setWindowTitle(base_title)
+
     def _create_actions(self):
         def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
             path = os.path.join(self._icons_dir, filename)
@@ -2245,10 +2255,17 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_save.triggered.connect(self.save_project)
 
         self.action_save_as = QAction(
+            load_icon("save.png", QStyle.SP_DialogSaveButton),
             "Сохранить проект как…",
             self,
         )
         self.action_save_as.triggered.connect(self.save_project_as)
+
+        self.action_project_properties = QAction(
+            "Свойства проекта",
+            self,
+        )
+        self.action_project_properties.triggered.connect(self.show_project_properties_dialog)
 
         self.action_load = QAction(
             load_icon("load.png", QStyle.SP_DialogOpenButton),
@@ -2360,6 +2377,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.action_save)
         file_menu.addAction(self.action_save_as)
+        file_menu.addAction(self.action_project_properties)
         file_menu.addAction(self.action_load)
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
@@ -2625,6 +2643,7 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_halls": self.lock_halls,
             "lock_zones": self.lock_zones,
             "lock_anchors": self.lock_anchors,
+            "project_name": self.project_name,
             "current_project_file": self.current_project_file,
             "halls": [],
             "anchors": [],
@@ -3165,6 +3184,8 @@ class PlanEditorMainWindow(QMainWindow):
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.current_project_file = None
+        self.project_name = ""
+        self._update_window_title()
         self._saved_state_snapshot = None
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
         self.set_mode("calibrate")
@@ -3177,6 +3198,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.scene.pixmap.save(buf,"PNG")
             buf_data = buf.data().toBase64().data().decode()
         data = {
+            "project_name": self.project_name,
             "image_data": buf_data,
             "pixel_per_cm_x": self.scene.pixel_per_cm_x,
             "pixel_per_cm_y": self.scene.pixel_per_cm_y,
@@ -3242,6 +3264,28 @@ class PlanEditorMainWindow(QMainWindow):
             return False
         QMessageBox.information(self, "Сохранено", "Проект сохранён.")
         return True
+
+    def show_project_properties_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Свойства проекта")
+        form = QFormLayout(dialog)
+
+        name_edit = QLineEdit(dialog)
+        name_edit.setPlaceholderText("Имя проекта (опционально)")
+        if self.project_name:
+            name_edit.setText(self.project_name)
+        form.addRow("Имя:", name_edit)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        self.project_name = name_edit.text().strip()
+        self._update_window_title()
 
     def save_project(self):
         target = self.current_project_file
@@ -3634,6 +3678,8 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_halls   = data.get("lock_halls",False)
         self.lock_zones   = data.get("lock_zones",False)
         self.lock_anchors = data.get("lock_anchors",False)
+        self.project_name = data.get("project_name", "") if isinstance(data.get("project_name", ""), str) else ""
+        self._update_window_title()
         self.grid_calibrated = True
         for hd in data.get("halls",[]):
             h = HallItem(
@@ -3727,19 +3773,22 @@ class PlanEditorMainWindow(QMainWindow):
 
         host_edit = QLineEdit(dialog)
         host_edit.setPlaceholderText("example.com")
+        host_edit.setText("178.154.195.218")
         form_layout.addRow("Хост:", host_edit)
 
         login_edit = QLineEdit(dialog)
         login_edit.setPlaceholderText("user")
+        login_edit.setText("radiog")
         form_layout.addRow("Логин:", login_edit)
 
         target_dir_edit = QLineEdit(dialog)
         target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
+        target_dir_edit.setText("~/headphones")
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
         port_spin = QSpinBox(dialog)
         port_spin.setRange(1, 65535)
-        port_spin.setValue(22)
+        port_spin.setValue(26015)
         form_layout.addRow("Порт:", port_spin)
 
         password_edit = QLineEdit(dialog)
@@ -3752,7 +3801,11 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
         key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
-        default_key_path = find_default_ssh_key(os.getcwd())
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        preferred_key_path = os.path.join(app_root, "id_rsa")
+        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
+        if not default_key_path:
+            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
         if default_key_path:
             key_path_edit.setText(default_key_path)
         key_layout.addWidget(key_path_edit)
