@@ -4033,6 +4033,16 @@ class PlanEditorMainWindow(QMainWindow):
         audio_files_map: dict[str, int] = {}
         track_entries_map: dict[str, dict] = {}
         anchor_bound_flags = {a.number: bool(a.bound_explicit) for a in self.anchors}
+        anchor_zone_halls: dict[int, set[int]] = {}
+
+        for pz in self.proximity_zones:
+            if not pz.anchor:
+                continue
+            halls = pz.halls or ([pz.anchor.main_hall_number] if pz.anchor else [])
+            for hall_num in halls:
+                if not isinstance(hall_num, int):
+                    continue
+                anchor_zone_halls.setdefault(pz.anchor.number, set()).add(hall_num)
 
         def _bytes_from_b64(b64str: str) -> int:
             if not b64str:
@@ -4168,6 +4178,8 @@ class PlanEditorMainWindow(QMainWindow):
                     ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
                     if anchor_bound_flags.get(a.number, False):
                         ae["bound"] = True
+                    if h.number in anchor_zone_halls.get(a.number, set()):
+                        ae["anch_zone"] = True
                     room["anchors"].append(ae)
 
             zones: dict[int, dict] = {}
@@ -4242,6 +4254,8 @@ class PlanEditorMainWindow(QMainWindow):
                 s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
                 if a.get("bound"):
                     s += ', "bound": true'
+                if a.get("anch_zone"):
+                    s += ', "anch_zone": true'
                 s += " }"
                 alines.append(s)
             lines.append(",\n".join(alines))
