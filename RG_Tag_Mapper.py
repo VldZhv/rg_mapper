@@ -18,18 +18,11 @@ from datetime import datetime
 from mutagen.mp3 import MP3
 
 
-def find_default_ssh_key(*base_dirs: str) -> str | None:
-    search_dirs = []
-    seen = set()
-
-    for base_dir in base_dirs + (
-        os.path.expanduser("~/.ssh"),
-        os.path.expanduser("~"),
-    ):
-        if not base_dir or base_dir in seen:
-            continue
-        search_dirs.append(base_dir)
-        seen.add(base_dir)
+def find_default_ssh_key(base_dir: str) -> str | None:
+    try:
+        entries = os.listdir(base_dir)
+    except OSError:
+        return None
 
     preferred_names = {
         "id_rsa",
@@ -39,51 +32,19 @@ def find_default_ssh_key(*base_dirs: str) -> str | None:
         "id_ecdsa_sk",
         "id_ed25519_sk",
     }
+    for name in preferred_names:
+        path = os.path.join(base_dir, name)
+        if os.path.isfile(path):
+            return path
+
     allowed_suffixes = (".pem", ".key", ".rsa", ".ppk")
-
-    for base_dir in search_dirs:
-        try:
-            entries = os.listdir(base_dir)
-        except OSError:
-            continue
-
-        for name in preferred_names:
-            path = os.path.join(base_dir, name)
+    for entry in sorted(entries):
+        if entry.lower().endswith(allowed_suffixes):
+            path = os.path.join(base_dir, entry)
             if os.path.isfile(path):
                 return path
 
-        for entry in sorted(entries):
-            if entry.lower().endswith(allowed_suffixes):
-                path = os.path.join(base_dir, entry)
-                if os.path.isfile(path):
-                    return path
-
     return None
-
-
-def load_openssh_private_key(key_path: str, passphrase: str | None):
-    loaders = (
-        ("RSA", paramiko.RSAKey.from_private_key_file),
-        ("Ed25519", paramiko.Ed25519Key.from_private_key_file),
-        ("ECDSA", paramiko.ECDSAKey.from_private_key_file),
-        ("DSA", paramiko.DSSKey.from_private_key_file),
-    )
-    last_exc: Exception | None = None
-
-    for _, loader in loaders:
-        try:
-            return loader(key_path, password=passphrase)
-        except paramiko.PasswordRequiredException:
-            raise
-        except paramiko.SSHException as exc:
-            last_exc = exc
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
-
-    if last_exc:
-        raise last_exc
-
-    raise ValueError("Не удалось загрузить ключ: неизвестный формат OpenSSH")
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
@@ -3875,9 +3836,12 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout = QHBoxLayout(key_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("Файл ключа (по умолчанию ~/.ssh)")
+        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
         app_root = os.path.dirname(os.path.abspath(__file__))
-        default_key_path = find_default_ssh_key(app_root, os.getcwd())
+        preferred_key_path = os.path.join(app_root, "id_rsa")
+        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
+        if not default_key_path:
+            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
         if default_key_path:
             key_path_edit.setText(default_key_path)
         key_layout.addWidget(key_path_edit)
@@ -3944,10 +3908,10 @@ class PlanEditorMainWindow(QMainWindow):
                     key_obj = _PPKKey.from_file(key_path, password=passphrase)
                 else:
                     raise ModuleNotFoundError(
-                        "Поддержка ключей PPK недоступна. Используйте ключ OpenSSH или установите совместимый модуль вручную."
+                        "Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk."
                     )
             else:
-                key_obj = load_openssh_private_key(key_path, passphrase)
+                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
         except Exception as exc:
             QMessageBox.critical(
                 self,
@@ -3972,8 +3936,8 @@ class PlanEditorMainWindow(QMainWindow):
                 port=port,
                 username=username,
                 pkey=key_obj,
-                allow_agent=True,
-                look_for_keys=True,
+                allow_agent=False,
+                look_for_keys=False,
             )
             sftp = ssh.open_sftp()
 
