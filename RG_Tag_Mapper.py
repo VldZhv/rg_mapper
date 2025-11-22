@@ -18,11 +18,18 @@ from datetime import datetime
 from mutagen.mp3 import MP3
 
 
-def find_default_ssh_key(base_dir: str) -> str | None:
-    try:
-        entries = os.listdir(base_dir)
-    except OSError:
-        return None
+def find_default_ssh_key(*base_dirs: str) -> str | None:
+    search_dirs = []
+    seen = set()
+
+    for base_dir in base_dirs + (
+        os.path.expanduser("~/.ssh"),
+        os.path.expanduser("~"),
+    ):
+        if not base_dir or base_dir in seen:
+            continue
+        search_dirs.append(base_dir)
+        seen.add(base_dir)
 
     preferred_names = {
         "id_rsa",
@@ -32,17 +39,24 @@ def find_default_ssh_key(base_dir: str) -> str | None:
         "id_ecdsa_sk",
         "id_ed25519_sk",
     }
-    for name in preferred_names:
-        path = os.path.join(base_dir, name)
-        if os.path.isfile(path):
-            return path
-
     allowed_suffixes = (".pem", ".key", ".rsa", ".ppk")
-    for entry in sorted(entries):
-        if entry.lower().endswith(allowed_suffixes):
-            path = os.path.join(base_dir, entry)
+
+    for base_dir in search_dirs:
+        try:
+            entries = os.listdir(base_dir)
+        except OSError:
+            continue
+
+        for name in preferred_names:
+            path = os.path.join(base_dir, name)
             if os.path.isfile(path):
                 return path
+
+        for entry in sorted(entries):
+            if entry.lower().endswith(allowed_suffixes):
+                path = os.path.join(base_dir, entry)
+                if os.path.isfile(path):
+                    return path
 
     return None
 
@@ -3861,12 +3875,9 @@ class PlanEditorMainWindow(QMainWindow):
         key_layout = QHBoxLayout(key_widget)
         key_layout.setContentsMargins(0, 0, 0, 0)
         key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
+        key_path_edit.setPlaceholderText("Файл ключа (по умолчанию ~/.ssh)")
         app_root = os.path.dirname(os.path.abspath(__file__))
-        preferred_key_path = os.path.join(app_root, "id_rsa")
-        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
-        if not default_key_path:
-            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
+        default_key_path = find_default_ssh_key(app_root, os.getcwd())
         if default_key_path:
             key_path_edit.setText(default_key_path)
         key_layout.addWidget(key_path_edit)
@@ -3961,8 +3972,8 @@ class PlanEditorMainWindow(QMainWindow):
                 port=port,
                 username=username,
                 pkey=key_obj,
-                allow_agent=False,
-                look_for_keys=False,
+                allow_agent=True,
+                look_for_keys=True,
             )
             sftp = ssh.open_sftp()
 
