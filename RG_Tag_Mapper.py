@@ -46,6 +46,31 @@ def find_default_ssh_key(base_dir: str) -> str | None:
 
     return None
 
+
+def load_openssh_private_key(key_path: str, passphrase: str | None):
+    loaders = (
+        ("RSA", paramiko.RSAKey.from_private_key_file),
+        ("Ed25519", paramiko.Ed25519Key.from_private_key_file),
+        ("ECDSA", paramiko.ECDSAKey.from_private_key_file),
+        ("DSA", paramiko.DSSKey.from_private_key_file),
+    )
+    last_exc: Exception | None = None
+
+    for _, loader in loaders:
+        try:
+            return loader(key_path, password=passphrase)
+        except paramiko.PasswordRequiredException:
+            raise
+        except paramiko.SSHException as exc:
+            last_exc = exc
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+
+    if last_exc:
+        raise last_exc
+
+    raise ValueError("Не удалось загрузить ключ: неизвестный формат OpenSSH")
+
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
 
@@ -3908,10 +3933,10 @@ class PlanEditorMainWindow(QMainWindow):
                     key_obj = _PPKKey.from_file(key_path, password=passphrase)
                 else:
                     raise ModuleNotFoundError(
-                        "Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk."
+                        "Поддержка ключей PPK недоступна. Используйте ключ OpenSSH или установите совместимый модуль вручную."
                     )
             else:
-                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
+                key_obj = load_openssh_private_key(key_path, passphrase)
         except Exception as exc:
             QMessageBox.critical(
                 self,
