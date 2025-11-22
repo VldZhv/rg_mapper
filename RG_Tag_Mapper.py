@@ -4110,6 +4110,7 @@ class PlanEditorMainWindow(QMainWindow):
             secondary = info.get("secondary")
             if isinstance(secondary, dict) and secondary.get("filename"):
                 entry["audio2"] = secondary["filename"]
+                entry["extra"] = True
             return entry
 
         def register_track_entry(entry: dict | None):
@@ -4135,6 +4136,9 @@ class PlanEditorMainWindow(QMainWindow):
 
             if entry.get("audio2") and not existing.get("audio2"):
                 existing["audio2"] = entry["audio2"]
+
+            if entry.get("extra"):
+                existing["extra"] = True
 
             existing["play_once"] = bool(existing.get("play_once")) or bool(entry.get("play_once"))
             existing["reset"] = bool(existing.get("reset")) or bool(entry.get("reset"))
