@@ -3429,7 +3429,8 @@ class PlanEditorMainWindow(QMainWindow):
             hd = {
                 "num": h.number, "name": h.name,
                 "x_px": h.pos().x(), "y_px": h.pos().y(),
-                "w_px": h.rect().width(), "h_px": h.rect().height()
+                "w_px": h.rect().width(), "h_px": h.rect().height(),
+                "extra_tracks": list(h.extra_tracks),
             }
             if h.audio_settings:
                 hd["audio"] = h.audio_settings
