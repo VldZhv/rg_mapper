@@ -71,6 +71,22 @@ def parse_additional_ids(text: str):
     return ids
 
 
+def normalize_int_list(values) -> list[int]:
+    if values is None:
+        return []
+    if isinstance(values, str):
+        return parse_additional_ids(values)
+
+    result: list[int] = []
+    if isinstance(values, (list, tuple, set)):
+        for value in values:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+    return result
+
+
 def load_audio_file_info(path: str):
     try:
         audio = MP3(path)
@@ -2895,9 +2911,14 @@ class PlanEditorMainWindow(QMainWindow):
                     scene=self.scene
                 )
                 hall.audio_settings = copy.deepcopy(hall_data.get("audio")) if hall_data.get("audio") else None
-                hall.extra_tracks = [int(x) for x in hall_data.get("extra_tracks", []) if isinstance(x, int)]
+                hall.extra_tracks = normalize_int_list(hall_data.get("extra_tracks"))
                 zone_audio_raw = hall_data.get("zone_audio") or {}
-                hall.zone_audio_tracks = {int(k): copy.deepcopy(v) for k, v in zone_audio_raw.items()}
+                hall.zone_audio_tracks = {}
+                for k, v in zone_audio_raw.items():
+                    try:
+                        hall.zone_audio_tracks[int(k)] = copy.deepcopy(v)
+                    except (TypeError, ValueError):
+                        continue
                 self.scene.addItem(hall)
                 self.halls.append(hall)
                 for zone_data in hall_data.get("zones", []):
@@ -3599,8 +3620,8 @@ class PlanEditorMainWindow(QMainWindow):
 
             width = room.get("width")
             height = room.get("height")
-            extra_tracks_raw = room.get("extra_tracks") if isinstance(room.get("extra_tracks"), list) else []
-            hall.extra_tracks = [int(x) for x in extra_tracks_raw if isinstance(x, int)]
+            extra_tracks_raw = room.get("extra_tracks")
+            hall.extra_tracks = normalize_int_list(extra_tracks_raw)
             try:
                 width_m = float(width)
                 height_m = float(height)
@@ -4032,10 +4053,15 @@ class PlanEditorMainWindow(QMainWindow):
                 scene=self.scene
             )
             h.audio_settings = hd.get("audio")
-            h.extra_tracks = [int(x) for x in hd.get("extra_tracks", []) if isinstance(x, int)]
+            h.extra_tracks = normalize_int_list(hd.get("extra_tracks"))
             zone_audio_raw = hd.get("zone_audio", {})
             if zone_audio_raw:
-                h.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
+                h.zone_audio_tracks = {}
+                for k, v in zone_audio_raw.items():
+                    try:
+                        h.zone_audio_tracks[int(k)] = copy.deepcopy(v)
+                    except (TypeError, ValueError):
+                        continue
             self.scene.addItem(h); self.halls.append(h)
             for zd in hd.get("zones",[]):
                 bl = QPointF(zd.get("bottom_left_x",0), zd.get("bottom_left_y",0))
