@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView
+    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView, QProgressDialog
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
@@ -4264,6 +4264,73 @@ class PlanEditorMainWindow(QMainWindow):
         sftp = None
         normalized_target_directory = ""
         export_folder_name = ""
+        upload_results: list[tuple[str, bool, str]] = []
+
+        progress_dialog = QProgressDialog("Подготовка выгрузки...", "Отмена", 0, 100, self)
+        progress_dialog.setWindowTitle("Выгрузка на сервер")
+        progress_dialog.setWindowModality(Qt.WindowModal)
+        progress_dialog.setMinimumDuration(0)
+        progress_dialog.setAutoClose(False)
+        progress_dialog.setAutoReset(False)
+        progress_dialog.setValue(0)
+
+        bytes_uploaded = 0
+        total_bytes_to_upload = 0
+        file_index = 0
+        total_files_count = 0
+
+        def update_progress(file_label: str):
+            percent = int((bytes_uploaded / total_bytes_to_upload) * 100) if total_bytes_to_upload > 0 else 0
+            progress_dialog.setValue(min(percent, 100))
+            progress_dialog.setLabelText(
+                f"Файл {file_index}/{total_files_count}: {file_label}\n"
+                f"Прогресс: {bytes_uploaded / (1024 * 1024):.2f} / {total_bytes_to_upload / (1024 * 1024):.2f} МБ"
+            )
+            QApplication.processEvents()
+
+        def upload_bytes(remote_path: str, payload: bytes, display_name: str):
+            nonlocal bytes_uploaded, file_index
+            chunk_size = 256 * 1024
+            uploaded_for_file = 0
+            file_size = len(payload)
+            file_index += 1
+            update_progress(display_name)
+            with sftp.file(remote_path, "wb") as remote_file:
+                while uploaded_for_file < file_size:
+                    if progress_dialog.wasCanceled():
+                        raise RuntimeError("Выгрузка отменена пользователем.")
+                    next_chunk = payload[uploaded_for_file:uploaded_for_file + chunk_size]
+                    remote_file.write(next_chunk)
+                    uploaded_for_file += len(next_chunk)
+                    bytes_uploaded += len(next_chunk)
+                    update_progress(display_name)
+                remote_file.flush()
+            upload_results.append((display_name, True, "OK"))
+
+        def upload_local_file(local_path: str, remote_path: str, display_name: str):
+            nonlocal bytes_uploaded, file_index
+            chunk_size = 256 * 1024
+            file_size = os.path.getsize(local_path)
+            uploaded_for_file = 0
+            file_index += 1
+            update_progress(display_name)
+            with open(local_path, "rb") as local_stream, sftp.file(remote_path, "wb") as remote_stream:
+                while True:
+                    if progress_dialog.wasCanceled():
+                        raise RuntimeError("Выгрузка отменена пользователем.")
+                    chunk = local_stream.read(chunk_size)
+                    if not chunk:
+                        break
+                    remote_stream.write(chunk)
+                    uploaded_for_file += len(chunk)
+                    bytes_uploaded += len(chunk)
+                    update_progress(display_name)
+                remote_stream.flush()
+
+            if uploaded_for_file != file_size:
+                upload_results.append((display_name, False, "Размер файла не совпал после передачи"))
+                raise IOError(f"Файл передан не полностью: {display_name}")
+            upload_results.append((display_name, True, "OK"))
 
         def ensure_remote_dirs(path_value: str):
             normalized = path_value.replace("\\", "/")
@@ -4307,12 +4374,14 @@ class PlanEditorMainWindow(QMainWindow):
             rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
             tracks_remote_path = posixpath.join(normalized_target_directory, "tracks.json")
 
-            with sftp.file(rooms_remote_path, "wb") as remote_rooms:
-                remote_rooms.write(rooms_bytes)
-                remote_rooms.flush()
-            with sftp.file(tracks_remote_path, "wb") as remote_tracks:
-                remote_tracks.write(tracks_bytes)
-                remote_tracks.flush()
+            files_to_upload: list[tuple[str, str, int, str, str]] = [
+                ("bytes", rooms_remote_path, len(rooms_bytes), "rooms.json", "rooms.json"),
+                ("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"),
+            ]
+
+            project_file_remote = ""
+            local_project_file = ""
+            local_root_dir = ""
 
             if upload_full_project:
                 if not self._ensure_project_layout_for_current_file():
@@ -4323,9 +4392,13 @@ class PlanEditorMainWindow(QMainWindow):
                     raise IOError("Не удалось определить структуру локального проекта для полной выгрузки.")
 
                 project_file_remote = posixpath.join(normalized_target_directory, os.path.basename(local_project_file))
-                with open(local_project_file, "rb") as project_file_stream, sftp.file(project_file_remote, "wb") as remote_project_file:
-                    remote_project_file.write(project_file_stream.read())
-                    remote_project_file.flush()
+                files_to_upload.append((
+                    "file",
+                    project_file_remote,
+                    os.path.getsize(local_project_file),
+                    os.path.basename(local_project_file),
+                    local_project_file,
+                ))
 
                 root_remote_dir = posixpath.join(normalized_target_directory, os.path.basename(local_root_dir))
                 ensure_remote_dirs(root_remote_dir)
@@ -4337,15 +4410,32 @@ class PlanEditorMainWindow(QMainWindow):
                     for filename in files:
                         local_path = os.path.join(root, filename)
                         remote_path = posixpath.join(remote_root, filename)
-                        with open(local_path, "rb") as local_stream, sftp.file(remote_path, "wb") as remote_stream:
-                            remote_stream.write(local_stream.read())
-                            remote_stream.flush()
+                        rel_display = os.path.relpath(local_path, os.path.dirname(local_project_file)).replace("\\", "/")
+                        files_to_upload.append(("file", remote_path, os.path.getsize(local_path), rel_display, local_path))
+
+            total_bytes_to_upload = sum(item[2] for item in files_to_upload)
+            total_files_count = len(files_to_upload)
+            progress_dialog.setMaximum(100)
+
+            for item_type, remote_path, _, display_name, source in files_to_upload:
+                self.statusBar().showMessage(f"Загрузка: {display_name}")
+                if item_type == "bytes":
+                    payload = rooms_bytes if source == "rooms.json" else tracks_bytes
+                    upload_bytes(remote_path, payload, display_name)
+                else:
+                    upload_local_file(source, remote_path, display_name)
+
+            progress_dialog.setValue(100)
+            progress_dialog.setLabelText("Выгрузка завершена")
+            QApplication.processEvents()
 
         except Exception as exc:
+            upload_results.append(("Общий статус", False, str(exc)))
             QMessageBox.critical(self, "Выгрузка на сервер", f"Ошибка при передаче данных:\n{exc}")
             self.statusBar().showMessage("Ошибка выгрузки конфигурации.", 7000)
             return
         finally:
+            progress_dialog.close()
             if sftp is not None:
                 try:
                     sftp.close()
@@ -4362,6 +4452,12 @@ class PlanEditorMainWindow(QMainWindow):
         message_text = f"{mode_suffix}: данные успешно переданы на сервер."
         if normalized_target_directory:
             message_text += f" Каталог: {normalized_target_directory}."
+        if upload_results:
+            success_count = sum(1 for _, ok, _ in upload_results if ok)
+            fail_count = sum(1 for _, ok, _ in upload_results if not ok)
+            message_text += f"\nФайлов загружено: {success_count}"
+            if fail_count:
+                message_text += f", ошибок: {fail_count}"
         QMessageBox.information(self, "Выгрузка на сервер", message_text)
 
 
