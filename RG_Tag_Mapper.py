@@ -4680,6 +4680,12 @@ class PlanEditorMainWindow(QMainWindow):
 
     @staticmethod
     def _normalize_unmatched_audio_files(raw_files):
+        def _safe_size(value):
+            try:
+                return max(0, int(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
         normalized = {}
         if not isinstance(raw_files, dict):
             return normalized
@@ -4689,7 +4695,7 @@ class PlanEditorMainWindow(QMainWindow):
             item = meta if isinstance(meta, dict) else {}
             normalized[name] = {
                 "name": name,
-                "size": max(0, int(item.get("size", 0) or 0)),
+                "size": _safe_size(item.get("size", 0)),
                 "crc32": str(item.get("crc32", "") or ""),
             }
         return normalized
