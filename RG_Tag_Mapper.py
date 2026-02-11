@@ -3408,6 +3408,19 @@ class PlanEditorMainWindow(QMainWindow):
         self.push_undo_state(prev_state)
 
     def _collect_project_data(self):
+        def strip_audio_binary(audio_info):
+            if not isinstance(audio_info, dict):
+                return None
+            cleaned = {}
+            for key, value in audio_info.items():
+                if key == "data":
+                    continue
+                if key == "secondary":
+                    cleaned[key] = strip_audio_binary(value)
+                else:
+                    cleaned[key] = copy.deepcopy(value)
+            return cleaned
+
         buf_data = ""
         if self.scene.pixmap:
             buf = QBuffer(); buf.open(QBuffer.WriteOnly)
@@ -3433,9 +3446,9 @@ class PlanEditorMainWindow(QMainWindow):
                 "extra_tracks": list(h.extra_tracks),
             }
             if h.audio_settings:
-                hd["audio"] = h.audio_settings
+                hd["audio"] = strip_audio_binary(h.audio_settings)
             if h.zone_audio_tracks:
-                hd["zone_audio"] = {str(k): v for k, v in h.zone_audio_tracks.items()}
+                hd["zone_audio"] = {str(k): strip_audio_binary(v) for k, v in h.zone_audio_tracks.items()}
             zs = []
             for ch in h.childItems():
                 if isinstance(ch,RectZoneItem):
@@ -3468,7 +3481,7 @@ class PlanEditorMainWindow(QMainWindow):
                 "bound": z.bound,
                 "halls": z.halls,
                 "blacklist": z.blacklist,
-                "audio": copy.deepcopy(z.audio_info) if z.audio_info else None,
+                "audio": strip_audio_binary(z.audio_info) if z.audio_info else None,
             }
             data["proximity_zones"].append(zd)
         return data
