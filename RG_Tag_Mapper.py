@@ -1,5 +1,5 @@
 ﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
-import sys, math, json, base64, os, copy, posixpath
+import sys, math, json, base64, os, copy, posixpath, zlib
 import paramiko
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -4030,7 +4030,7 @@ class PlanEditorMainWindow(QMainWindow):
 
     def _prepare_export_payload(self) -> tuple[str, dict]:
         config = {"rooms": []}
-        audio_files_map: dict[str, int] = {}
+        audio_files_map: dict[str, dict] = {}
         track_entries_map: dict[str, dict] = {}
         anchor_bound_flags = {a.number: bool(a.bound_explicit) for a in self.anchors}
         anchor_zone_halls: dict[int, set[int]] = {}
@@ -4063,19 +4063,46 @@ class PlanEditorMainWindow(QMainWindow):
                 size_val = _bytes_from_b64(info.get("data", ""))
             return max(size_val, 0)
 
+        def _extract_crc32(info: dict | None) -> str:
+            if not isinstance(info, dict):
+                return ""
+            payload = info.get("data")
+            if not payload:
+                return ""
+            try:
+                raw_bytes = base64.b64decode(payload.encode("ascii"))
+            except Exception:
+                return ""
+            crc = 0
+            for offset in range(0, len(raw_bytes), 4096):
+                crc = zlib.crc32(raw_bytes[offset:offset + 4096], crc)
+            return f"{crc & 0xFFFFFFFF:08x}"
+
+        def _register_audio_file(name: str, size_bytes: int, crc32_hex: str):
+            existing = audio_files_map.get(name)
+            if existing is None:
+                audio_files_map[name] = {
+                    "size": max(size_bytes, 0),
+                    "crc32": crc32_hex
+                }
+                return
+            existing["size"] = max(int(existing.get("size", 0)), max(size_bytes, 0))
+            if crc32_hex and not existing.get("crc32"):
+                existing["crc32"] = crc32_hex
+
         def collect_audio_files(info: dict | None):
             if not isinstance(info, dict):
                 return
             name = info.get("filename")
             if isinstance(name, str) and name:
                 size_bytes = _extract_size(info)
-                audio_files_map[name] = max(audio_files_map.get(name, 0), size_bytes)
+                _register_audio_file(name, size_bytes, _extract_crc32(info))
             secondary = info.get("secondary")
             if isinstance(secondary, dict):
                 sec_name = secondary.get("filename")
                 if isinstance(sec_name, str) and sec_name:
                     size_bytes2 = _extract_size(secondary)
-                    audio_files_map[sec_name] = max(audio_files_map.get(sec_name, 0), size_bytes2)
+                    _register_audio_file(sec_name, size_bytes2, _extract_crc32(secondary))
 
         def create_track_entry(info: dict | None, room_id: int, is_hall: bool):
             if not isinstance(info, dict):
@@ -4320,7 +4347,14 @@ class PlanEditorMainWindow(QMainWindow):
             )
 
         track_entries.sort(key=_sort_key)
-        files_list = [{"name": name, "size": audio_files_map[name]} for name in sorted(audio_files_map)]
+        files_list = []
+        for name in sorted(audio_files_map):
+            file_info = audio_files_map[name]
+            files_list.append({
+                "name": name,
+                "size": int(file_info.get("size", 0)),
+                "crc32": file_info.get("crc32", "")
+            })
         tracks_data = {
             "files": files_list,
             "langs": [],
