@@ -2049,6 +2049,8 @@ class PlanEditorMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.project_name: str = ""
+        self.project_root_dir: str | None = None
+        self.project_content_dir: str | None = None
         self._update_window_title()
         self.resize(1200,800)
 
@@ -2256,6 +2258,93 @@ class PlanEditorMainWindow(QMainWindow):
             self.setWindowTitle(f"{base_title} — {name}")
         else:
             self.setWindowTitle(base_title)
+    def _ensure_project_paths(self, project_file: str):
+        project_file_abs = os.path.abspath(project_file)
+        project_dir = os.path.dirname(project_file_abs)
+        project_base_name = os.path.splitext(os.path.basename(project_file_abs))[0]
+        project_folder_name = self._sanitize_name_for_folder(project_base_name) or project_base_name
+        root_dir = os.path.join(project_dir, project_folder_name)
+        content_dir = os.path.join(root_dir, "content")
+
+        os.makedirs(project_dir, exist_ok=True)
+        os.makedirs(root_dir, exist_ok=True)
+        os.makedirs(content_dir, exist_ok=True)
+
+        self.project_root_dir = root_dir
+        self.project_content_dir = content_dir
+
+    def _ensure_project_layout_for_current_file(self):
+        if not self.current_project_file:
+            return False
+        try:
+            self._ensure_project_paths(self.current_project_file)
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось подготовить структуру проекта:\n{exc}")
+            return False
+
+    def _get_effective_project_root_dir(self):
+        if self.project_root_dir and os.path.isdir(self.project_root_dir):
+            return self.project_root_dir
+        if self.current_project_file:
+            project_file_abs = os.path.abspath(self.current_project_file)
+            project_dir = os.path.dirname(project_file_abs)
+            project_base_name = os.path.splitext(os.path.basename(project_file_abs))[0]
+            project_folder_name = self._sanitize_name_for_folder(project_base_name) or project_base_name
+            return os.path.join(project_dir, project_folder_name)
+        return None
+
+    def _get_effective_content_dir(self):
+        if self.project_content_dir and os.path.isdir(self.project_content_dir):
+            return self.project_content_dir
+        root_dir = self._get_effective_project_root_dir()
+        if not root_dir:
+            return None
+        return os.path.join(root_dir, "content")
+
+    def _rooms_json_path(self):
+        root_dir = self._get_effective_project_root_dir()
+        if not root_dir:
+            return None
+        return os.path.join(root_dir, "rooms.json")
+
+    def _tracks_json_path(self):
+        content_dir = self._get_effective_content_dir()
+        if not content_dir:
+            return None
+        return os.path.join(content_dir, "tracks.json")
+
+    def _write_auxiliary_configs(self, rooms_json_text: str, tracks_data: dict):
+        if not self._ensure_project_layout_for_current_file():
+            return False
+        rooms_path = self._rooms_json_path()
+        tracks_path = self._tracks_json_path()
+        if not rooms_path or not tracks_path:
+            return False
+        try:
+            with open(rooms_path, "w", encoding="utf-8") as rooms_file:
+                rooms_file.write(rooms_json_text)
+            with open(tracks_path, "w", encoding="utf-8") as tracks_file:
+                json.dump(tracks_data, tracks_file, ensure_ascii=False, indent=4)
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить rooms/tracks:\n{exc}")
+            return False
+        return True
+
+    def _iter_project_audio_files(self):
+        content_dir = self._get_effective_content_dir()
+        if not content_dir or not os.path.isdir(content_dir):
+            return []
+        results = []
+        for entry in sorted(os.listdir(content_dir)):
+            lower_name = entry.lower()
+            if not lower_name.endswith('.mp3'):
+                continue
+            full_path = os.path.join(content_dir, entry)
+            if os.path.isfile(full_path):
+                results.append(full_path)
+        return results
+
 
     def _create_actions(self):
         def load_icon(filename: str, fallback: QStyle.StandardPixmap | None = None):
@@ -2313,6 +2402,13 @@ class PlanEditorMainWindow(QMainWindow):
             self,
         )
         self.action_export.triggered.connect(self.show_export_menu)
+
+        self.action_refresh_audio = QAction(
+            load_icon("import.png", QStyle.SP_BrowserReload),
+            "Обновить аудио",
+            self,
+        )
+        self.action_refresh_audio.triggered.connect(self.refresh_audio_from_content)
 
         self.action_upload = QAction(
             load_icon("server.png", QStyle.SP_ArrowUp),
@@ -2408,6 +2504,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
         file_menu.addAction(self.action_export)
+        file_menu.addAction(self.action_refresh_audio)
         file_menu.addAction(self.action_upload)
         file_menu.addAction(self.action_pdf)
 
@@ -2468,6 +2565,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
+        file_toolbar.addAction(self.action_refresh_audio)
         file_toolbar.addAction(self.action_upload)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
@@ -2671,6 +2769,8 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_anchors": self.lock_anchors,
             "project_name": self.project_name,
             "current_project_file": self.current_project_file,
+            "project_root_dir": self.project_root_dir,
+            "project_content_dir": self.project_content_dir,
             "halls": [],
             "anchors": [],
             "proximity_zones": [],
@@ -2766,6 +2866,10 @@ class PlanEditorMainWindow(QMainWindow):
             self.lock_zones = state.get("lock_zones", False)
             self.lock_anchors = state.get("lock_anchors", False)
             self.current_project_file = state.get("current_project_file")
+            self.project_name = state.get("project_name", "") if isinstance(state.get("project_name", ""), str) else ""
+            self.project_root_dir = state.get("project_root_dir")
+            self.project_content_dir = state.get("project_content_dir")
+            self._update_window_title()
             for hall_data in state.get("halls", []):
                 hall = HallItem(
                     hall_data.get("x_px", 0.0),
@@ -3184,9 +3288,41 @@ class PlanEditorMainWindow(QMainWindow):
             return True
         return self._confirm_save_discard("Сохранить текущий проект перед загрузкой другого?")
 
+    def _request_new_project_destination(self):
+        default_name = self.project_name.strip() or "project"
+        name, ok = QInputDialog.getText(
+            self,
+            "Новый проект",
+            "Введите имя проекта:",
+            text=default_name,
+        )
+        if not ok:
+            return None
+        project_name = name.strip()
+        if not project_name:
+            QMessageBox.warning(self, "Новый проект", "Имя проекта не может быть пустым.")
+            return None
+
+        folder = QFileDialog.getExistingDirectory(
+            self,
+            "Выберите папку для сохранения проекта",
+            os.path.dirname(self.current_project_file) if self.current_project_file else os.getcwd(),
+        )
+        if not folder:
+            return None
+
+        project_file = os.path.join(folder, f"{project_name}.proj")
+        return project_name, project_file
+
     def open_image(self):
         if not self._confirm_save_before_new_project():
             return
+
+        requested = self._request_new_project_destination()
+        if not requested:
+            return
+        project_name, project_file = requested
+
         message = (
             "Для создания нового проекта загрузите план помещения в формате jpg, png, bmp, "
             "после чего выполните калибровку координатной сетки, указав на плане 2 точки, "
@@ -3213,14 +3349,21 @@ class PlanEditorMainWindow(QMainWindow):
         if pix.isNull():
             QMessageBox.warning(self, "Ошибка", "Не удалось загрузить.")
             return
+
+        try:
+            self._ensure_project_paths(project_file)
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось подготовить структуру проекта:\n{exc}")
+            return
+
         prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear(); self.proximity_zones.clear()
         self.scene.pixmap = None
         self._reset_background_cache()
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
-        self.current_project_file = None
-        self.project_name = ""
+        self.current_project_file = os.path.abspath(project_file)
+        self.project_name = project_name
         self._update_window_title()
         self._saved_state_snapshot = None
         self.statusBar().showMessage("Калибровка: укажите 2 точки")
@@ -3293,11 +3436,18 @@ class PlanEditorMainWindow(QMainWindow):
 
     def _save_project_file(self, fp, data):
         try:
+            self._ensure_project_paths(fp)
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=4)
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить:\n{e}")
             return False
+
+        self.current_project_file = os.path.abspath(fp)
+        rooms_json_text, tracks_data = self._prepare_export_payload()
+        if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
+            return False
+
         QMessageBox.information(self, "Сохранено", "Проект сохранён.")
         return True
 
@@ -3326,23 +3476,30 @@ class PlanEditorMainWindow(QMainWindow):
     def save_project(self):
         target = self.current_project_file
         if not target:
-            target, _ = QFileDialog.getSaveFileName(self, "Сохранить проект", "", "*.proj")
-            if not target:
+            requested = self._request_new_project_destination()
+            if not requested:
                 return False
+            requested_name, requested_file = requested
+            self.project_name = requested_name
+            self._update_window_title()
+            target = requested_file
         data = self._collect_project_data()
         if self._save_project_file(target, data):
-            self.current_project_file = target
+            self.current_project_file = os.path.abspath(target)
             self._mark_state_as_saved()
             return True
         return False
 
     def save_project_as(self):
-        fp, _ = QFileDialog.getSaveFileName(self, "Сохранить проект как", "", "*.proj")
-        if not fp:
+        requested = self._request_new_project_destination()
+        if not requested:
             return False
+        requested_name, fp = requested
+        self.project_name = requested_name
+        self._update_window_title()
         data = self._collect_project_data()
         if self._save_project_file(fp, data):
-            self.current_project_file = fp
+            self.current_project_file = os.path.abspath(fp)
             self._mark_state_as_saved()
             return True
         return False
@@ -3689,6 +3846,96 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Импорт аудиофайлов завершён.", 5000)
         QMessageBox.information(self, "Импорт", "Импорт аудиофайлов завершён.")
 
+    def refresh_audio_from_content(self):
+        if not self.current_project_file:
+            QMessageBox.warning(self, "Обновить аудио", "Сначала сохраните или создайте проект.")
+            return
+        if not self._ensure_project_layout_for_current_file():
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Обновить аудио",
+            "Сканировать папку content и автоматически назначить MP3-файлы по номеру трека?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        hall_by_num = {h.number: h for h in self.halls}
+        zone_halls: dict[int, list[HallItem]] = {}
+        for hall in self.halls:
+            for child in hall.childItems():
+                if isinstance(child, RectZoneItem):
+                    zone_halls.setdefault(child.zone_num, []).append(hall)
+
+        proximity_by_id: dict[int, list[ProximityZoneItem]] = {}
+        for pz in self.proximity_zones:
+            proximity_by_id.setdefault(pz.zone_num, []).append(pz)
+
+        prev_state = self.capture_state()
+        changed = False
+        assigned_halls = 0
+        assigned_zones = 0
+        unmatched: list[str] = []
+
+        for audio_path in self._iter_project_audio_files():
+            try:
+                info = load_audio_file_info(audio_path)
+            except ValueError:
+                continue
+            track_id = extract_track_id(info.get("filename", ""))
+            if track_id <= 0:
+                continue
+            info["interruptible"] = True
+            info["reset"] = False
+            info["play_once"] = False
+            info["extra_ids"] = []
+
+            hall_target = hall_by_num.get(track_id)
+            if hall_target is not None:
+                hall_target.audio_settings = copy.deepcopy(info)
+                assigned_halls += 1
+                changed = True
+                continue
+
+            zone_candidates = zone_halls.get(track_id, [])
+            if len(zone_candidates) == 1:
+                zone_candidates[0].zone_audio_tracks[track_id] = copy.deepcopy(info)
+                assigned_zones += 1
+                changed = True
+                continue
+
+            prox_candidates = proximity_by_id.get(track_id, [])
+            if len(prox_candidates) == 1:
+                prox_candidates[0].audio_info = copy.deepcopy(info)
+                assigned_zones += 1
+                changed = True
+                continue
+
+            unmatched.append(info.get("filename", ""))
+
+        self.populate_tree()
+        self.populate_tracks_table()
+        if changed:
+            self.push_undo_state(prev_state)
+
+        rooms_json_text, tracks_data = self._prepare_export_payload()
+        if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
+            return
+
+        message_lines = [
+            f"Назначено треков залам: {assigned_halls}",
+            f"Назначено треков зонам: {assigned_zones}",
+            f"Файл tracks.json обновлён: {self._tracks_json_path()}",
+        ]
+        if unmatched:
+            message_lines.append("Без соответствия: " + ", ".join(unmatched))
+        QMessageBox.information(self, "Обновить аудио", "\n".join(message_lines))
+        self.statusBar().showMessage("Обновление аудио завершено.", 5000)
+
+
     def load_project(self):
         if not self._confirm_save_before_load():
             return
@@ -3767,7 +4014,10 @@ class PlanEditorMainWindow(QMainWindow):
             )
             self.proximity_zones.append(zone)
         self.apply_lock_flags(); self.populate_tree()
-        self.current_project_file = fp
+        self.current_project_file = os.path.abspath(fp)
+        self.project_root_dir = None
+        self.project_content_dir = None
+        self._ensure_project_layout_for_current_file()
         QMessageBox.information(self,"Загружено","Проект загружен.")
         self.statusBar().clearMessage()
         self.push_undo_state(prev_state)
@@ -3803,6 +4053,19 @@ class PlanEditorMainWindow(QMainWindow):
 
     def upload_config_to_server(self):
         rooms_json_text, tracks_data = self._prepare_export_payload()
+
+        upload_mode, mode_ok = QInputDialog.getItem(
+            self,
+            "Выгрузка на сервер",
+            "Что выгружать:",
+            ["Проект целиком", "Только конфигурацию"],
+            1,
+            False,
+        )
+        if not mode_ok:
+            return
+        upload_full_project = upload_mode == "Проект целиком"
+
         dialog = QDialog(self)
         dialog.setWindowTitle("Выгрузка на сервер")
         form_layout = QFormLayout(dialog)
@@ -3877,29 +4140,20 @@ class PlanEditorMainWindow(QMainWindow):
         passphrase = password_edit.text() or None
 
         if not host or not username or not key_path:
-            QMessageBox.warning(
-                self,
-                "Выгрузка на сервер",
-                "Заполните хост, логин и путь к ключу для подключения.",
-            )
+            QMessageBox.warning(self, "Выгрузка на сервер", "Заполните хост, логин и путь к ключу для подключения.")
             return
 
         try:
             with open(key_path, "rb") as _key_file:
                 _key_file.read(1)
         except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Выгрузка на сервер",
-                f"Не удалось открыть файл ключа:\n{exc}",
-            )
+            QMessageBox.critical(self, "Выгрузка на сервер", f"Не удалось открыть файл ключа:\n{exc}")
             return
 
         try:
             key_obj = None
             if key_path.lower().endswith(".ppk"):
                 import importlib.util
-
                 if importlib.util.find_spec("paramiko.ppk") is not None:
                     from paramiko.ppk import PPKKey as _PPKKey
                     key_obj = _PPKKey.from_file(key_path, password=passphrase)
@@ -3907,79 +4161,60 @@ class PlanEditorMainWindow(QMainWindow):
                     from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
                     key_obj = _PPKKey.from_file(key_path, password=passphrase)
                 else:
-                    raise ModuleNotFoundError(
-                        "Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk."
-                    )
+                    raise ModuleNotFoundError("Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk.")
             else:
                 key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
         except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Выгрузка на сервер",
-                f"Не удалось загрузить ключ:\n{exc}",
-            )
+            QMessageBox.critical(self, "Выгрузка на сервер", f"Не удалось загрузить SSH-ключ:\n{exc}")
             return
 
-        ssh = None
-        sftp = None
         tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
         rooms_bytes = rooms_json_text.encode("utf-8")
         tracks_bytes = tracks_json_text.encode("utf-8")
-        export_folder_name = None
-        normalized_target_directory = None
+
+        ssh = None
+        sftp = None
+        normalized_target_directory = ""
+        export_folder_name = ""
+
+        def ensure_remote_dirs(path_value: str):
+            normalized = path_value.replace("\\", "/")
+            if not normalized:
+                return
+            parts = [part for part in normalized.split("/") if part]
+            current = "/" if normalized.startswith("/") else ""
+            for part in parts:
+                current = f"{current}/{part}" if current else part
+                try:
+                    sftp.listdir(current)
+                except IOError:
+                    sftp.mkdir(current)
 
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(
-                hostname=host,
-                port=port,
-                username=username,
-                pkey=key_obj,
-                allow_agent=False,
-                look_for_keys=False,
-            )
+            ssh.connect(hostname=host, port=port, username=username, pkey=key_obj, allow_agent=False, look_for_keys=False)
             sftp = ssh.open_sftp()
 
             remote_dir_clean = remote_dir.replace("\\", "/").strip()
             remote_dir_effective = remote_dir_clean
             if remote_dir_effective and remote_dir_effective not in (".", "./"):
-                try:
-                    if remote_dir_effective.startswith("~"):
-                        try:
-                            home_dir = sftp.normalize(".")
-                        except IOError:
-                            home_dir = sftp.normalize("~")
-                        subpath = remote_dir_effective[1:].lstrip("/")
-                        remote_dir_effective = (
-                            posixpath.join(home_dir, subpath) if subpath else home_dir
-                        )
-                    sftp.listdir(remote_dir_effective)
-                except IOError as exc:
-                    raise IOError(f"Каталог {remote_dir_clean} недоступен: {exc}") from exc
-                try:
-                    base_dir = sftp.normalize(remote_dir_effective)
-                except IOError:
-                    base_dir = remote_dir_effective
+                if remote_dir_effective.startswith("~"):
+                    try:
+                        home_dir = sftp.normalize(".")
+                    except IOError:
+                        home_dir = sftp.normalize("~")
+                    subpath = remote_dir_effective[1:].lstrip("/")
+                    remote_dir_effective = posixpath.join(home_dir, subpath) if subpath else home_dir
+                ensure_remote_dirs(remote_dir_effective)
+                base_dir = sftp.normalize(remote_dir_effective)
             else:
-                try:
-                    base_dir = sftp.normalize(".")
-                except IOError:
-                    base_dir = "."
+                base_dir = sftp.normalize(".")
 
             export_folder_name = self._build_remote_export_folder_name()
             target_directory = posixpath.join(base_dir, export_folder_name)
-            try:
-                sftp.mkdir(target_directory)
-            except IOError as exc:
-                raise IOError(
-                    f"Не удалось создать каталог {export_folder_name}: {exc}"
-                ) from exc
-
-            try:
-                normalized_target_directory = sftp.normalize(target_directory)
-            except IOError:
-                normalized_target_directory = target_directory
+            ensure_remote_dirs(target_directory)
+            normalized_target_directory = sftp.normalize(target_directory)
 
             rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
             tracks_remote_path = posixpath.join(normalized_target_directory, "tracks.json")
@@ -3991,12 +4226,35 @@ class PlanEditorMainWindow(QMainWindow):
                 remote_tracks.write(tracks_bytes)
                 remote_tracks.flush()
 
+            if upload_full_project:
+                if not self._ensure_project_layout_for_current_file():
+                    return
+                local_project_file = os.path.abspath(self.current_project_file) if self.current_project_file else ""
+                local_root_dir = self._get_effective_project_root_dir()
+                if not local_project_file or not local_root_dir or not os.path.isdir(local_root_dir):
+                    raise IOError("Не удалось определить структуру локального проекта для полной выгрузки.")
+
+                project_file_remote = posixpath.join(normalized_target_directory, os.path.basename(local_project_file))
+                with open(local_project_file, "rb") as project_file_stream, sftp.file(project_file_remote, "wb") as remote_project_file:
+                    remote_project_file.write(project_file_stream.read())
+                    remote_project_file.flush()
+
+                root_remote_dir = posixpath.join(normalized_target_directory, os.path.basename(local_root_dir))
+                ensure_remote_dirs(root_remote_dir)
+
+                for root, _, files in os.walk(local_root_dir):
+                    rel_root = os.path.relpath(root, local_root_dir)
+                    remote_root = root_remote_dir if rel_root == "." else posixpath.join(root_remote_dir, rel_root.replace("\\", "/"))
+                    ensure_remote_dirs(remote_root)
+                    for filename in files:
+                        local_path = os.path.join(root, filename)
+                        remote_path = posixpath.join(remote_root, filename)
+                        with open(local_path, "rb") as local_stream, sftp.file(remote_path, "wb") as remote_stream:
+                            remote_stream.write(local_stream.read())
+                            remote_stream.flush()
+
         except Exception as exc:
-            QMessageBox.critical(
-                self,
-                "Выгрузка на сервер",
-                f"Ошибка при передаче данных:\n{exc}",
-            )
+            QMessageBox.critical(self, "Выгрузка на сервер", f"Ошибка при передаче данных:\n{exc}")
             self.statusBar().showMessage("Ошибка выгрузки конфигурации.", 7000)
             return
         finally:
@@ -4011,22 +4269,13 @@ class PlanEditorMainWindow(QMainWindow):
                 except Exception:
                     pass
 
+        mode_suffix = "Проект целиком" if upload_full_project else "Только конфигурация"
+        self.statusBar().showMessage(f"Выгрузка на сервер завершена ({mode_suffix}).", 7000)
+        message_text = f"{mode_suffix}: данные успешно переданы на сервер."
         if normalized_target_directory:
-            status_suffix = f" в каталог {normalized_target_directory}"
-        elif export_folder_name:
-            status_suffix = f" в каталог {export_folder_name}"
-        else:
-            status_suffix = ""
-        self.statusBar().showMessage(
-            f"Конфигурация выгружена на сервер{status_suffix}.",
-            7000,
-        )
-        message_text = "Конфигурация успешно передана на сервер."
-        if normalized_target_directory:
-            message_text += f" Файлы сохранены в каталоге {normalized_target_directory}."
-        elif export_folder_name:
-            message_text += f" Файлы сохранены в каталоге {export_folder_name}."
+            message_text += f" Каталог: {normalized_target_directory}."
         QMessageBox.information(self, "Выгрузка на сервер", message_text)
+
 
     def _prepare_export_payload(self) -> tuple[str, dict]:
         config = {"rooms": []}
