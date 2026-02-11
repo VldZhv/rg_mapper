@@ -2207,6 +2207,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_halls = False; self.lock_zones = False; self.lock_anchors = False
         self.last_selected_items = []
         self.current_project_file = None
+        self.unmatched_audio_files = {}
         self.undo_stack = []
         self._undo_limit = 30
         self._restoring_state = False
@@ -2781,6 +2782,7 @@ class PlanEditorMainWindow(QMainWindow):
             "current_project_file": self.current_project_file,
             "project_root_dir": self.project_root_dir,
             "project_content_dir": self.project_content_dir,
+            "unmatched_audio_files": copy.deepcopy(self.unmatched_audio_files),
             "halls": [],
             "anchors": [],
             "proximity_zones": [],
@@ -2880,6 +2882,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.project_name = state.get("project_name", "") if isinstance(state.get("project_name", ""), str) else ""
             self.project_root_dir = state.get("project_root_dir")
             self.project_content_dir = state.get("project_content_dir")
+            self.unmatched_audio_files = self._normalize_unmatched_audio_files(state.get("unmatched_audio_files"))
             self._update_window_title()
             for hall_data in state.get("halls", []):
                 hall = HallItem(
@@ -3370,6 +3373,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         prev_state = self.capture_state()
         self.scene.clear(); self.halls.clear(); self.anchors.clear(); self.proximity_zones.clear()
+        self.unmatched_audio_files = {}
         self.scene.pixmap = None
         self._reset_background_cache()
         self.scene.set_background_image(pix)
@@ -3397,6 +3401,7 @@ class PlanEditorMainWindow(QMainWindow):
             "lock_halls": self.lock_halls,
             "lock_zones": self.lock_zones,
             "lock_anchors": self.lock_anchors,
+            "unmatched_audio_files": copy.deepcopy(self.unmatched_audio_files),
             "halls": [], "anchors": [], "proximity_zones": []
         }
         for h in self.halls:
@@ -3457,6 +3462,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         self.current_project_file = os.path.abspath(fp)
         rooms_json_text, tracks_data = self._prepare_export_payload()
+        self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return False
 
@@ -3973,25 +3979,8 @@ class PlanEditorMainWindow(QMainWindow):
             self.push_undo_state(prev_state)
 
         rooms_json_text, tracks_data = self._prepare_export_payload()
-        if unmatched_files:
-            files_index = {
-                str(item.get("name", "")): item
-                for item in tracks_data.get("files", [])
-                if isinstance(item, dict) and item.get("name")
-            }
-            for name, meta in unmatched_files.items():
-                existing = files_index.get(name)
-                if existing is None:
-                    files_index[name] = {
-                        "name": name,
-                        "size": int(meta.get("size", 0)),
-                        "crc32": str(meta.get("crc32", "")),
-                    }
-                    continue
-                existing["size"] = max(int(existing.get("size", 0)), int(meta.get("size", 0)))
-                if not existing.get("crc32") and meta.get("crc32"):
-                    existing["crc32"] = str(meta.get("crc32", ""))
-            tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
+        self.unmatched_audio_files = self._normalize_unmatched_audio_files(unmatched_files)
+        self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return
 
@@ -4032,6 +4021,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.lock_zones   = data.get("lock_zones",False)
         self.lock_anchors = data.get("lock_anchors",False)
         self.project_name = data.get("project_name", "") if isinstance(data.get("project_name", ""), str) else ""
+        self.unmatched_audio_files = self._normalize_unmatched_audio_files(data.get("unmatched_audio_files"))
         self._update_window_title()
         self.grid_calibrated = True
         for hd in data.get("halls",[]):
@@ -4687,6 +4677,42 @@ class PlanEditorMainWindow(QMainWindow):
         }
 
         return rooms_json_text, tracks_data
+
+    @staticmethod
+    def _normalize_unmatched_audio_files(raw_files):
+        normalized = {}
+        if not isinstance(raw_files, dict):
+            return normalized
+        for name, meta in raw_files.items():
+            if not isinstance(name, str) or not name:
+                continue
+            item = meta if isinstance(meta, dict) else {}
+            normalized[name] = {
+                "name": name,
+                "size": max(0, int(item.get("size", 0) or 0)),
+                "crc32": str(item.get("crc32", "") or ""),
+            }
+        return normalized
+
+    def _merge_unmatched_audio_files_into_tracks_data(self, tracks_data: dict):
+        files_index = {
+            str(item.get("name", "")): item
+            for item in tracks_data.get("files", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        for name, meta in self.unmatched_audio_files.items():
+            existing = files_index.get(name)
+            if existing is None:
+                files_index[name] = {
+                    "name": name,
+                    "size": int(meta.get("size", 0)),
+                    "crc32": str(meta.get("crc32", "")),
+                }
+                continue
+            existing["size"] = max(int(existing.get("size", 0)), int(meta.get("size", 0)))
+            if not existing.get("crc32") and meta.get("crc32"):
+                existing["crc32"] = str(meta.get("crc32", ""))
+        tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
 
     def closeEvent(self, event):
         if not self._confirm_save_discard("Сохранить текущий проект перед выходом?"):
