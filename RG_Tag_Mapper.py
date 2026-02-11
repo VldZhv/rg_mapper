@@ -749,6 +749,12 @@ class HallEditDialog(QDialog):
         self.height_spin.setValue(height_m)
         form.addRow("Высота (м)", self.height_spin)
 
+        self.extra_tracks_edit = QLineEdit()
+        self.extra_tracks_edit.setPlaceholderText("Например: 101, 102, 103")
+        current_extra_tracks = getattr(hall_item, "extra_tracks", []) or []
+        self.extra_tracks_edit.setText(", ".join(str(x) for x in current_extra_tracks if isinstance(x, int)))
+        form.addRow("Треки с ручным вводом", self.extra_tracks_edit)
+
         self.audio_widget = AudioTrackWidget(self, hall_item.audio_settings)
         layout.addWidget(self.audio_widget)
 
@@ -763,6 +769,7 @@ class HallEditDialog(QDialog):
             'name': self.name_edit.text(),
             'width': self.width_spin.value(),
             'height': self.height_spin.value(),
+            'extra_tracks': parse_additional_ids(self.extra_tracks_edit.text()),
             'audio': self.audio_widget.get_data()
         }
 
@@ -961,6 +968,7 @@ class HallItem(QGraphicsRectItem):
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.setZValue(-w_px*h_px); self.tree_item = None
         self.audio_settings = None
+        self.extra_tracks: list[int] = []
         self.zone_audio_tracks = {}
         self._undo_snapshot = None
         self._undo_initial_pos = None
@@ -1024,6 +1032,7 @@ class HallItem(QGraphicsRectItem):
                 new_name = values['name']
                 new_w_m = values['width']
                 new_h_m = values['height']
+                self.extra_tracks = values.get('extra_tracks', [])
                 self.audio_settings = values['audio']
                 old = self.number
                 for a in mw.anchors:
@@ -2798,6 +2807,7 @@ class PlanEditorMainWindow(QMainWindow):
                 "w_px": hall.rect().width(),
                 "h_px": hall.rect().height(),
                 "audio": copy.deepcopy(hall.audio_settings) if hall.audio_settings else None,
+                "extra_tracks": list(hall.extra_tracks),
                 "zone_audio": {str(k): copy.deepcopy(v) for k, v in hall.zone_audio_tracks.items()}
             }
             zones = []
@@ -2882,6 +2892,7 @@ class PlanEditorMainWindow(QMainWindow):
                     scene=self.scene
                 )
                 hall.audio_settings = copy.deepcopy(hall_data.get("audio")) if hall_data.get("audio") else None
+                hall.extra_tracks = [int(x) for x in hall_data.get("extra_tracks", []) if isinstance(x, int)]
                 zone_audio_raw = hall_data.get("zone_audio") or {}
                 hall.zone_audio_tracks = {int(k): copy.deepcopy(v) for k, v in zone_audio_raw.items()}
                 self.scene.addItem(hall)
@@ -3582,6 +3593,8 @@ class PlanEditorMainWindow(QMainWindow):
 
             width = room.get("width")
             height = room.get("height")
+            extra_tracks_raw = room.get("extra_tracks") if isinstance(room.get("extra_tracks"), list) else []
+            hall.extra_tracks = [int(x) for x in extra_tracks_raw if isinstance(x, int)]
             try:
                 width_m = float(width)
                 height_m = float(height)
@@ -3880,19 +3893,39 @@ class PlanEditorMainWindow(QMainWindow):
         assigned_halls = 0
         assigned_zones = 0
         unmatched: list[str] = []
+        unmatched_files: dict[str, dict] = {}
 
         for audio_path in self._iter_project_audio_files():
             try:
                 info = load_audio_file_info(audio_path)
             except ValueError:
                 continue
-            track_id = extract_track_id(info.get("filename", ""))
-            if track_id <= 0:
-                continue
+            filename = str(info.get("filename", "") or "")
+            track_id = extract_track_id(filename)
             info["interruptible"] = True
             info["reset"] = False
             info["play_once"] = False
             info["extra_ids"] = []
+
+            if track_id <= 0:
+                data_b64 = info.get("data", "")
+                crc32_hex = ""
+                if data_b64:
+                    try:
+                        raw_bytes = base64.b64decode(data_b64.encode("ascii"))
+                        crc = 0
+                        for offset in range(0, len(raw_bytes), 4096):
+                            crc = zlib.crc32(raw_bytes[offset:offset + 4096], crc)
+                        crc32_hex = f"{crc & 0xFFFFFFFF:08x}"
+                    except Exception:
+                        crc32_hex = ""
+                unmatched_files[filename] = {
+                    "name": filename,
+                    "size": int(info.get("size") or 0),
+                    "crc32": crc32_hex,
+                }
+                unmatched.append(filename)
+                continue
 
             hall_target = hall_by_num.get(track_id)
             if hall_target is not None:
@@ -3915,7 +3948,24 @@ class PlanEditorMainWindow(QMainWindow):
                 changed = True
                 continue
 
-            unmatched.append(info.get("filename", ""))
+            unmatched_name = filename
+            data_b64 = info.get("data", "")
+            crc32_hex = ""
+            if data_b64:
+                try:
+                    raw_bytes = base64.b64decode(data_b64.encode("ascii"))
+                    crc = 0
+                    for offset in range(0, len(raw_bytes), 4096):
+                        crc = zlib.crc32(raw_bytes[offset:offset + 4096], crc)
+                    crc32_hex = f"{crc & 0xFFFFFFFF:08x}"
+                except Exception:
+                    crc32_hex = ""
+            unmatched_files[unmatched_name] = {
+                "name": unmatched_name,
+                "size": int(info.get("size") or 0),
+                "crc32": crc32_hex,
+            }
+            unmatched.append(unmatched_name)
 
         self.populate_tree()
         self.populate_tracks_table()
@@ -3923,6 +3973,25 @@ class PlanEditorMainWindow(QMainWindow):
             self.push_undo_state(prev_state)
 
         rooms_json_text, tracks_data = self._prepare_export_payload()
+        if unmatched_files:
+            files_index = {
+                str(item.get("name", "")): item
+                for item in tracks_data.get("files", [])
+                if isinstance(item, dict) and item.get("name")
+            }
+            for name, meta in unmatched_files.items():
+                existing = files_index.get(name)
+                if existing is None:
+                    files_index[name] = {
+                        "name": name,
+                        "size": int(meta.get("size", 0)),
+                        "crc32": str(meta.get("crc32", "")),
+                    }
+                    continue
+                existing["size"] = max(int(existing.get("size", 0)), int(meta.get("size", 0)))
+                if not existing.get("crc32") and meta.get("crc32"):
+                    existing["crc32"] = str(meta.get("crc32", ""))
+            tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return
 
@@ -3973,6 +4042,7 @@ class PlanEditorMainWindow(QMainWindow):
                 scene=self.scene
             )
             h.audio_settings = hd.get("audio")
+            h.extra_tracks = [int(x) for x in hd.get("extra_tracks", []) if isinstance(x, int)]
             zone_audio_raw = hd.get("zone_audio", {})
             if zone_audio_raw:
                 h.zone_audio_tracks = {int(k): v for k, v in zone_audio_raw.items()}
@@ -4450,6 +4520,8 @@ class PlanEditorMainWindow(QMainWindow):
                 "anchors": [],
                 "zones": []
             }
+            if h.extra_tracks:
+                room["extra_tracks"] = sorted({int(x) for x in h.extra_tracks if isinstance(x, int)})
 
             for a in self.anchors:
                 if a.main_hall_number == h.number or h.number in a.extra_halls:
@@ -4528,8 +4600,10 @@ class PlanEditorMainWindow(QMainWindow):
                 f'"num": {room["num"]},',
                 f'"width": {room["width"]},',
                 f'"height": {room["height"]},',
+                (f'"extra_tracks": {json.dumps(room["extra_tracks"], ensure_ascii=False)},' if room.get("extra_tracks") else None),
                 '"anchors": ['
             ]
+            lines = [line for line in lines if line is not None]
             alines = []
             for a in room["anchors"]:
                 s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
