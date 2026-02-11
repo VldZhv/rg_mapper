@@ -2303,10 +2303,11 @@ class PlanEditorMainWindow(QMainWindow):
         return os.path.join(root_dir, "content")
 
     def _rooms_json_path(self):
-        root_dir = self._get_effective_project_root_dir()
-        if not root_dir:
+        if not self.current_project_file:
             return None
-        return os.path.join(root_dir, "rooms.json")
+        project_file_abs = os.path.abspath(self.current_project_file)
+        project_dir = os.path.dirname(project_file_abs)
+        return os.path.join(project_dir, "rooms.json")
 
     def _tracks_json_path(self):
         content_dir = self._get_effective_content_dir()
@@ -2404,7 +2405,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_export.triggered.connect(self.show_export_menu)
 
         self.action_refresh_audio = QAction(
-            load_icon("import.png", QStyle.SP_BrowserReload),
+            load_icon("audio.png", QStyle.SP_BrowserReload),
             "Обновить аудио",
             self,
         )
@@ -2565,7 +2566,6 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
-        file_toolbar.addAction(self.action_refresh_audio)
         file_toolbar.addAction(self.action_upload)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
@@ -2575,6 +2575,7 @@ class PlanEditorMainWindow(QMainWindow):
         tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         tools_toolbar.setIconSize(icon_size)
         tools_toolbar.addAction(self.action_calibrate)
+        tools_toolbar.addAction(self.action_refresh_audio)
         self._add_toolbar_group_separator(tools_toolbar)
         tools_toolbar.addAction(self.action_add_hall)
         tools_toolbar.addAction(self.action_add_anchor)
