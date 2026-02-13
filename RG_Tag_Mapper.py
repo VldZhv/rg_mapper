@@ -13,7 +13,7 @@ from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
     QPdfWriter, QPageSize, QCursor, QKeySequence, QIcon, QPalette
 )
-from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize
+from PySide6.QtCore import Qt, QRectF, QPointF, QSizeF, QBuffer, QByteArray, QTimer, QPoint, QSize, QSettings
 from datetime import datetime
 from mutagen.mp3 import MP3
 
@@ -48,6 +48,57 @@ def find_default_ssh_key(base_dir: str) -> str | None:
 
 def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
+
+
+SETTINGS_ORG = "RG"
+SETTINGS_APP = "RG_Tag_Mapper"
+SETTINGS_LAST_DIR = "paths/last_dir"
+
+
+def app_settings() -> QSettings:
+    return QSettings(SETTINGS_ORG, SETTINGS_APP)
+
+
+def get_last_used_directory(default: str | None = None) -> str:
+    settings = app_settings()
+    stored = settings.value(SETTINGS_LAST_DIR, "", type=str)
+    if isinstance(stored, str) and stored and os.path.isdir(stored):
+        return stored
+    if default and os.path.isdir(default):
+        return default
+    return os.getcwd()
+
+
+def remember_last_used_path(path: str | None):
+    if not path:
+        return
+    normalized = os.path.dirname(path) if os.path.isfile(path) else path
+    if normalized and os.path.isdir(normalized):
+        app_settings().setValue(SETTINGS_LAST_DIR, os.path.abspath(normalized))
+
+
+def choose_open_file(parent, title: str, directory: str = "", filter_text: str = ""):
+    start_dir = directory if directory else get_last_used_directory()
+    file_path, selected_filter = QFileDialog.getOpenFileName(parent, title, start_dir, filter_text)
+    if file_path:
+        remember_last_used_path(file_path)
+    return file_path, selected_filter
+
+
+def choose_save_file(parent, title: str, directory: str = "", filter_text: str = ""):
+    start_dir = directory if directory else get_last_used_directory()
+    file_path, selected_filter = QFileDialog.getSaveFileName(parent, title, start_dir, filter_text)
+    if file_path:
+        remember_last_used_path(file_path)
+    return file_path, selected_filter
+
+
+def choose_directory(parent, title: str, directory: str = ""):
+    start_dir = directory if directory else get_last_used_directory()
+    folder = QFileDialog.getExistingDirectory(parent, title, start_dir)
+    if folder:
+        remember_last_used_path(folder)
+    return folder
 
 # ---------------------------------------------------------------------------
 # Audio helpers and widgets
@@ -245,7 +296,7 @@ class AudioTrackWidget(QWidget):
         return result
 
     def _select_main_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выбрать аудио", "", "MP3 файлы (*.mp3)")
+        path, _ = choose_open_file(self, "Выбрать аудио", get_last_used_directory(), "MP3 файлы (*.mp3)")
         if not path:
             return
         try:
@@ -260,7 +311,7 @@ class AudioTrackWidget(QWidget):
         self._update_state()
 
     def _select_secondary_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Выбрать дополнительный аудио", "", "MP3 файлы (*.mp3)")
+        path, _ = choose_open_file(self, "Выбрать дополнительный аудио", get_last_used_directory(), "MP3 файлы (*.mp3)")
         if not path:
             return
         try:
@@ -376,8 +427,6 @@ class TracksListWidget(QWidget):
                 self.mainwindow.halls,
                 key=lambda h: self._normalize_sort_key(getattr(h, "number", 0))
             )
-            if not halls:
-                return
             for hall in halls:
                 hall_title = f"Зал {hall.number}"
                 if hall.name:
@@ -394,6 +443,19 @@ class TracksListWidget(QWidget):
 
                 for track_id, info in self._sorted_track_items(hall.zone_audio_tracks):
                     self._add_track_item(hall_item, hall, info, False, track_id)
+
+            proximity_tracks = [pz for pz in getattr(self.mainwindow, "proximity_zones", []) if isinstance(getattr(pz, "audio_info", None), dict)]
+            if proximity_tracks:
+                proximity_root = QTreeWidgetItem(["Зоны по приближению"])
+                proximity_root.setData(0, Qt.UserRole, {"type": "proximity_root"})
+                proximity_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
+                self.tree.addTopLevelItem(proximity_root)
+                proximity_root.setFirstColumnSpanned(True)
+                proximity_root.setExpanded(True)
+
+                proximity_tracks.sort(key=lambda z: self._normalize_sort_key(getattr(z, "zone_num", 0)))
+                for pz in proximity_tracks:
+                    self._add_proximity_track_item(proximity_root, pz)
         finally:
             self._updating = False
         self._adjust_name_column_width()
@@ -414,6 +476,32 @@ class TracksListWidget(QWidget):
             return []
         items.sort(key=lambda item: self._normalize_sort_key(item[0]))
         return items
+
+    def _add_proximity_track_item(self, parent_item, proximity_zone):
+        info = getattr(proximity_zone, "audio_info", None)
+        if not isinstance(info, dict):
+            return
+        item = QTreeWidgetItem(parent_item)
+        item.setText(0, f"Зона по приближению {proximity_zone.zone_num}")
+        item.setText(1, str(info.get('filename', '') or ''))
+        item.setText(2, "")
+        item.setText(3, "")
+        item.setText(4, "")
+        hall_numbers = [h for h in (proximity_zone.halls or []) if isinstance(h, int)]
+        hall_text = ", ".join(str(x) for x in sorted(set(hall_numbers)))
+        if not hall_text and proximity_zone.anchor and isinstance(proximity_zone.anchor.main_hall_number, int):
+            hall_text = str(proximity_zone.anchor.main_hall_number)
+        item.setText(5, hall_text)
+        extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
+        item.setText(6, ", ".join(str(x) for x in extras))
+        item.setText(7, str(info.get('display_name', '') or ''))
+
+        item.setCheckState(2, Qt.Checked if info.get('play_once') else Qt.Unchecked)
+        item.setCheckState(3, Qt.Checked if info.get('reset') else Qt.Unchecked)
+        item.setCheckState(4, Qt.Checked if info.get('interruptible', True) else Qt.Unchecked)
+
+        item.setData(0, Qt.UserRole, {"type": "proximity_track", "zone_num": proximity_zone.zone_num, "anchor_id": proximity_zone.anchor.number if proximity_zone.anchor else None})
+        item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable | Qt.ItemIsUserCheckable)
 
     def _add_track_item(self, parent_item, hall, info, is_hall_track, track_id):
         if not isinstance(info, dict):
@@ -451,6 +539,18 @@ class TracksListWidget(QWidget):
         item.setFlags(flags)
 
     def _resolve_track(self, payload):
+        if payload.get("type") == "proximity_track":
+            zone_num = payload.get("zone_num")
+            anchor_id = payload.get("anchor_id")
+            for zone in getattr(self.mainwindow, "proximity_zones", []):
+                if getattr(zone, "zone_num", None) != zone_num:
+                    continue
+                zone_anchor = getattr(zone, "anchor", None)
+                zone_anchor_id = zone_anchor.number if zone_anchor else None
+                if zone_anchor_id == anchor_id:
+                    return zone, zone.audio_info, None
+            return None, None, None
+
         hall_number = payload.get("hall")
         hall = next((h for h in self.mainwindow.halls if h.number == hall_number), None)
         if hall is None:
@@ -571,6 +671,9 @@ class TracksListWidget(QWidget):
         return True
 
     def _handle_hall_number_change(self, payload, value):
+        if payload.get("type") == "proximity_track":
+            QMessageBox.warning(self, "Ошибка", "Для треков зон по приближению изменение номера зала в этом списке недоступно.")
+            return False
         hall, info, track_id = self._resolve_track(payload)
         if hall is None or info is None:
             return False
@@ -2238,6 +2341,28 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Загрузите изображение для начала работы.")
         self.update_undo_action()
         self.populate_tracks_table()
+        self._restore_window_preferences()
+
+    def _save_window_preferences(self):
+        settings = app_settings()
+        settings.setValue("window/geometry", self.saveGeometry())
+        settings.setValue("window/state", self.saveState())
+        settings.setValue("window/objects_dock_visible", self.objects_dock.isVisible())
+        settings.setValue("window/tracks_dock_visible", self.tracks_dock.isVisible())
+
+    def _restore_window_preferences(self):
+        settings = app_settings()
+        geometry = settings.value("window/geometry")
+        state = settings.value("window/state")
+        if geometry is not None:
+            self.restoreGeometry(geometry)
+        if state is not None:
+            self.restoreState(state)
+
+        objects_visible = settings.value("window/objects_dock_visible", True, type=bool)
+        tracks_visible = settings.value("window/tracks_dock_visible", False, type=bool)
+        self.objects_dock.setVisible(bool(objects_visible))
+        self.tracks_dock.setVisible(bool(tracks_visible))
 
     def _apply_app_icon(self):
         icon_path = os.path.join(self._icons_dir, "app.png")
@@ -2357,6 +2482,59 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить rooms/tracks:\n{exc}")
             return False
         return True
+
+    def _sync_auxiliary_configs_from_current_state(self, show_errors: bool = True) -> bool:
+        if not self.current_project_file:
+            return False
+        rooms_json_text, tracks_data = self._prepare_export_payload()
+        self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        if self._write_auxiliary_configs(rooms_json_text, tracks_data):
+            return True
+        if not show_errors:
+            self.statusBar().showMessage("Не удалось синхронизировать rooms/tracks с текущим состоянием проекта.", 5000)
+        return False
+
+    @staticmethod
+    def _merge_audio_info_preserving_track_settings(existing_info: dict | None, incoming_info: dict | None) -> dict | None:
+        if not isinstance(incoming_info, dict):
+            return copy.deepcopy(existing_info) if isinstance(existing_info, dict) else None
+        merged = copy.deepcopy(existing_info) if isinstance(existing_info, dict) else {}
+        merged.update(copy.deepcopy(incoming_info))
+
+        def _preserve_bool(key: str, default: bool):
+            if isinstance(existing_info, dict) and key in existing_info:
+                merged[key] = bool(existing_info.get(key, default))
+            elif key in merged:
+                merged[key] = bool(merged.get(key, default))
+            else:
+                merged[key] = default
+
+        _preserve_bool("interruptible", True)
+        _preserve_bool("reset", False)
+        _preserve_bool("play_once", False)
+
+        if isinstance(existing_info, dict) and "extra_ids" in existing_info:
+            merged["extra_ids"] = normalize_int_list(existing_info.get("extra_ids"))
+        else:
+            merged["extra_ids"] = normalize_int_list(merged.get("extra_ids"))
+
+        if isinstance(existing_info, dict) and "display_name" in existing_info:
+            name = (existing_info.get("display_name") or "").strip()
+            if name:
+                merged["display_name"] = name
+            else:
+                merged.pop("display_name", None)
+        elif "display_name" in merged:
+            merged_name = (merged.get("display_name") or "").strip()
+            if merged_name:
+                merged["display_name"] = merged_name
+            else:
+                merged.pop("display_name", None)
+
+        if isinstance(existing_info, dict) and isinstance(existing_info.get("secondary"), dict):
+            merged["secondary"] = copy.deepcopy(existing_info["secondary"])
+
+        return merged
 
     def _iter_project_audio_files(self):
         content_dir = self._get_effective_content_dir()
@@ -3047,7 +3225,7 @@ class PlanEditorMainWindow(QMainWindow):
 
     # PDF export
     def save_to_pdf(self):
-        fp,_ = QFileDialog.getSaveFileName(self, "Сохранить в PDF", "", "PDF files (*.pdf)")
+        fp,_ = choose_save_file(self, "Сохранить в PDF", get_last_used_directory(), "PDF files (*.pdf)")
         if not fp: return
         writer = QPdfWriter(fp); writer.setPageSize(QPageSize(QPageSize.A4)); writer.setResolution(300)
         painter = QPainter(writer); self.scene.render(painter); painter.end()
@@ -3298,6 +3476,16 @@ class PlanEditorMainWindow(QMainWindow):
     def _mark_state_as_saved(self):
         self._saved_state_snapshot = self.capture_state()
 
+    def restore_saved_project_snapshot(self) -> bool:
+        if self._saved_state_snapshot is None:
+            return True
+        try:
+            self.restore_state(copy.deepcopy(self._saved_state_snapshot))
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось восстановить последнее сохранённое состояние:\n{exc}")
+            return False
+
     def _confirm_save_discard(self, question: str) -> bool:
         if not self._has_unsaved_changes():
             return True
@@ -3312,7 +3500,10 @@ class PlanEditorMainWindow(QMainWindow):
             return False
         if reply == QMessageBox.Save:
             return self.save_project()
-        return True
+        discarded = self.restore_saved_project_snapshot()
+        if discarded:
+            self._sync_auxiliary_configs_from_current_state(show_errors=False)
+        return discarded
 
     def _confirm_save_before_new_project(self) -> bool:
         if not self._has_active_project():
@@ -3339,10 +3530,10 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.warning(self, "Новый проект", "Имя проекта не может быть пустым.")
             return None
 
-        folder = QFileDialog.getExistingDirectory(
+        folder = choose_directory(
             self,
             "Выберите папку для сохранения проекта",
-            os.path.dirname(self.current_project_file) if self.current_project_file else os.getcwd(),
+            os.path.dirname(self.current_project_file) if self.current_project_file else get_last_used_directory(),
         )
         if not folder:
             return None
@@ -3373,10 +3564,10 @@ class PlanEditorMainWindow(QMainWindow):
         )
         if reply != QMessageBox.Yes:
             return
-        fp, _ = QFileDialog.getOpenFileName(
+        fp, _ = choose_open_file(
             self,
             "Выбор плана помещения",
-            "",
+            get_last_used_directory(),
             "Изображения (*.png *.jpg *.bmp)",
         )
         if not fp:
@@ -3400,6 +3591,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.scene.set_background_image(pix)
         self.grid_calibrated = False
         self.current_project_file = os.path.abspath(project_file)
+        remember_last_used_path(self.current_project_file)
         self.project_name = project_name
         self._update_window_title()
         self._saved_state_snapshot = None
@@ -3496,6 +3688,7 @@ class PlanEditorMainWindow(QMainWindow):
             return False
 
         self.current_project_file = os.path.abspath(fp)
+        remember_last_used_path(self.current_project_file)
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
@@ -3584,7 +3777,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.export_tracks_config()
 
     def import_rooms_config(self):
-        fp, _ = QFileDialog.getOpenFileName(self, "Импорт объектов", "", "JSON файлы (*.json)")
+        fp, _ = choose_open_file(self, "Импорт объектов", get_last_used_directory(), "JSON файлы (*.json)")
         if not fp:
             return
         try:
@@ -3788,7 +3981,7 @@ class PlanEditorMainWindow(QMainWindow):
         return info
 
     def import_tracks_config(self):
-        fp, _ = QFileDialog.getOpenFileName(self, "Импорт аудиофайлов", "", "JSON файлы (*.json)")
+        fp, _ = choose_open_file(self, "Импорт аудиофайлов", get_last_used_directory(), "JSON файлы (*.json)")
         if not fp:
             return
         try:
@@ -3943,10 +4136,6 @@ class PlanEditorMainWindow(QMainWindow):
                 continue
             filename = str(info.get("filename", "") or "")
             track_id = extract_track_id(filename)
-            info["interruptible"] = True
-            info["reset"] = False
-            info["play_once"] = False
-            info["extra_ids"] = []
 
             if track_id <= 0:
                 data_b64 = info.get("data", "")
@@ -3970,21 +4159,22 @@ class PlanEditorMainWindow(QMainWindow):
 
             hall_target = hall_by_num.get(track_id)
             if hall_target is not None:
-                hall_target.audio_settings = copy.deepcopy(info)
+                hall_target.audio_settings = self._merge_audio_info_preserving_track_settings(hall_target.audio_settings, info)
                 assigned_halls += 1
                 changed = True
                 continue
 
             zone_candidates = zone_halls.get(track_id, [])
             if len(zone_candidates) == 1:
-                zone_candidates[0].zone_audio_tracks[track_id] = copy.deepcopy(info)
+                existing_zone_info = zone_candidates[0].zone_audio_tracks.get(track_id)
+                zone_candidates[0].zone_audio_tracks[track_id] = self._merge_audio_info_preserving_track_settings(existing_zone_info, info)
                 assigned_zones += 1
                 changed = True
                 continue
 
             prox_candidates = proximity_by_id.get(track_id, [])
             if len(prox_candidates) == 1:
-                prox_candidates[0].audio_info = copy.deepcopy(info)
+                prox_candidates[0].audio_info = self._merge_audio_info_preserving_track_settings(prox_candidates[0].audio_info, info)
                 assigned_zones += 1
                 changed = True
                 continue
@@ -4033,7 +4223,7 @@ class PlanEditorMainWindow(QMainWindow):
     def load_project(self):
         if not self._confirm_save_before_load():
             return
-        fp,_ = QFileDialog.getOpenFileName(self,"Загрузить проект","","*.proj")
+        fp,_ = choose_open_file(self,"Загрузить проект", get_last_used_directory(),"*.proj")
         if not fp: return
         prev_state = self.capture_state()
         try:
@@ -4116,6 +4306,7 @@ class PlanEditorMainWindow(QMainWindow):
             self.proximity_zones.append(zone)
         self.apply_lock_flags(); self.populate_tree()
         self.current_project_file = os.path.abspath(fp)
+        remember_last_used_path(self.current_project_file)
         self.project_root_dir = None
         self.project_content_dir = None
         self._ensure_project_layout_for_current_file()
@@ -4125,7 +4316,9 @@ class PlanEditorMainWindow(QMainWindow):
         self._mark_state_as_saved()
 
     def export_rooms_config(self):
-        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт объектов", "", "JSON файлы (*.json)")
+        if self.current_project_file:
+            self._sync_auxiliary_configs_from_current_state(show_errors=False)
+        fp, _ = choose_save_file(self, "Экспорт объектов", get_last_used_directory(), "JSON файлы (*.json)")
         if not fp:
             return
 
@@ -4139,7 +4332,9 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def export_tracks_config(self):
-        fp, _ = QFileDialog.getSaveFileName(self, "Экспорт аудиофайлов", "tracks.json", "JSON файлы (*.json)")
+        if self.current_project_file:
+            self._sync_auxiliary_configs_from_current_state(show_errors=False)
+        fp, _ = choose_save_file(self, "Экспорт аудиофайлов", os.path.join(get_last_used_directory(), "tracks.json"), "JSON файлы (*.json)")
         if not fp:
             return
 
@@ -4153,6 +4348,8 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def upload_config_to_server(self):
+        if self.current_project_file:
+            self._sync_auxiliary_configs_from_current_state(show_errors=False)
         rooms_json_text, tracks_data = self._prepare_export_payload()
 
         upload_mode, mode_ok = QInputDialog.getItem(
@@ -4212,7 +4409,7 @@ class PlanEditorMainWindow(QMainWindow):
         browse_button = QPushButton("Обзор…", key_widget)
 
         def browse_key_file():
-            filename, _ = QFileDialog.getOpenFileName(
+            filename, _ = choose_open_file(
                 self,
                 "Выберите приватный ключ SSH",
                 os.path.expanduser("~/.ssh"),
@@ -4857,11 +5054,16 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
 
     def closeEvent(self, event):
+        self._save_window_preferences()
         if not self._confirm_save_discard("Сохранить текущий проект перед выходом?"):
-            event.ignore(); return
-        try: self.scene.selectionChanged.disconnect(self.on_scene_selection_changed)
-        except: pass
-        self.view.setScene(None); event.accept()
+            event.ignore()
+            return
+        try:
+            self.scene.selectionChanged.disconnect(self.on_scene_selection_changed)
+        except Exception:
+            pass
+        self.view.setScene(None)
+        event.accept()
 
 if __name__ == "__main__":
     app = QApplication(os.getenv("QT_FORCE_STDERR_LOGGING") and sys.argv or sys.argv)
