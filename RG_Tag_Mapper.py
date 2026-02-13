@@ -2938,7 +2938,7 @@ class PlanEditorMainWindow(QMainWindow):
         version_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(version_label)
 
-        copyright_label = QLabel("Copyright (C) 2025, RadioGuide LLC", dialog)
+        copyright_label = QLabel("Copyright (C) 2026, RadioGuide LLC", dialog)
         copyright_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(copyright_label)
 
@@ -3700,7 +3700,7 @@ class PlanEditorMainWindow(QMainWindow):
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return False
 
-        QMessageBox.information(self, "Сохранено", "Проект сохранён.")
+        self.statusBar().showMessage("Проект успешно сохранён.", 5000)
         return True
 
     def show_project_properties_dialog(self):
@@ -4316,8 +4316,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.project_root_dir = None
         self.project_content_dir = None
         self._ensure_project_layout_for_current_file()
-        QMessageBox.information(self,"Загружено","Проект загружен.")
-        self.statusBar().clearMessage()
+        self.statusBar().showMessage("Проект успешно загружен.", 5000)
         self.push_undo_state(prev_state)
         self._mark_state_as_saved()
 
@@ -4333,7 +4332,6 @@ class PlanEditorMainWindow(QMainWindow):
             with open(fp, "w", encoding="utf-8") as f:
                 f.write(rooms_json_text)
             self.statusBar().showMessage("Экспорт объектов завершён.", 5000)
-            QMessageBox.information(self, "Экспорт", "Экспорт объектов завершён.")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
@@ -4349,7 +4347,6 @@ class PlanEditorMainWindow(QMainWindow):
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(tracks_data, f, ensure_ascii=False, indent=4)
             self.statusBar().showMessage("Экспорт аудиофайлов завершён.", 5000)
-            QMessageBox.information(self, "Экспорт", "Экспорт аудиофайлов завершён.")
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
