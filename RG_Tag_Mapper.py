@@ -574,7 +574,9 @@ class TracksListWidget(QWidget):
         if self._updating:
             return
         payload = item.data(0, Qt.UserRole)
-        if not isinstance(payload, dict) or payload.get("type") != "track":
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") not in ("track", "proximity_track"):
             return
 
         if column == 1:
@@ -2267,6 +2269,7 @@ class PlanEditorMainWindow(QMainWindow):
         dock_layout.addWidget(dock_frame)
 
         dock = QDockWidget("Список объектов", self); dock.setWidget(dock_container)
+        dock.setObjectName("objectsDock")
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.objects_dock = dock
@@ -2305,6 +2308,7 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_layout.addWidget(tracks_frame)
 
         tracks_dock = QDockWidget("Список треков", self)
+        tracks_dock.setObjectName("tracksDock")
         tracks_dock.setWidget(tracks_container)
         tracks_dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
         tracks_dock.setAllowedAreas(Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea)
@@ -2761,6 +2765,7 @@ class PlanEditorMainWindow(QMainWindow):
         )
 
         file_toolbar = QToolBar("Файл", self)
+        file_toolbar.setObjectName("fileToolbar")
         file_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         file_toolbar.setIconSize(icon_size)
         file_toolbar.addAction(self.action_open)
@@ -2776,6 +2781,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.file_toolbar = file_toolbar
 
         tools_toolbar = QToolBar("Инструменты", self)
+        tools_toolbar.setObjectName("toolsToolbar")
         tools_toolbar.setToolButtonStyle(Qt.ToolButtonIconOnly)
         tools_toolbar.setIconSize(icon_size)
         tools_toolbar.addAction(self.action_calibrate)
