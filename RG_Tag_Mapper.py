@@ -2492,6 +2492,7 @@ class PlanEditorMainWindow(QMainWindow):
             return False
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_existing_tracks_metadata(tracks_data)
         if self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return True
         if not show_errors:
@@ -3697,6 +3698,7 @@ class PlanEditorMainWindow(QMainWindow):
         remember_last_used_path(self.current_project_file)
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_existing_tracks_metadata(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return False
 
@@ -4224,6 +4226,7 @@ class PlanEditorMainWindow(QMainWindow):
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self.unmatched_audio_files = self._normalize_unmatched_audio_files(unmatched_files)
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_existing_tracks_metadata(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return
 
@@ -4356,6 +4359,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         _, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_existing_tracks_metadata(tracks_data)
         try:
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(tracks_data, f, ensure_ascii=False, indent=4)
@@ -4368,6 +4372,7 @@ class PlanEditorMainWindow(QMainWindow):
             self._sync_auxiliary_configs_from_current_state(show_errors=False)
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_existing_tracks_metadata(tracks_data)
 
         upload_mode, mode_ok = QInputDialog.getItem(
             self,
@@ -5071,6 +5076,52 @@ class PlanEditorMainWindow(QMainWindow):
             if not existing.get("crc32") and meta.get("crc32"):
                 existing["crc32"] = str(meta.get("crc32", ""))
         tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
+
+    def _merge_existing_tracks_metadata(self, tracks_data: dict):
+        tracks_path = self._tracks_json_path()
+        if not tracks_path or not os.path.isfile(tracks_path):
+            return
+        try:
+            with open(tracks_path, "r", encoding="utf-8") as f:
+                existing_data = json.load(f)
+        except Exception:
+            return
+
+        existing_files = existing_data.get("files") if isinstance(existing_data, dict) else None
+        if not isinstance(existing_files, list):
+            return
+
+        existing_index = {}
+        for item in existing_files:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            existing_index[name] = item
+
+        for item in tracks_data.get("files", []):
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            old_item = existing_index.get(name)
+            if not isinstance(old_item, dict):
+                continue
+
+            if not item.get("crc32") and old_item.get("crc32"):
+                item["crc32"] = str(old_item.get("crc32", ""))
+
+            try:
+                current_size = int(item.get("size") or 0)
+            except (TypeError, ValueError):
+                current_size = 0
+            try:
+                old_size = int(old_item.get("size") or 0)
+            except (TypeError, ValueError):
+                old_size = 0
+            item["size"] = max(current_size, old_size, 0)
 
     def closeEvent(self, event):
         self._save_window_preferences()
