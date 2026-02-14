@@ -3930,7 +3930,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.statusBar().showMessage("Импорт объектов завершён.", 5000)
         QMessageBox.information(self, "Импорт", "Импорт объектов завершён.")
 
-    def _build_audio_info_from_track(self, track: dict, file_sizes: dict[str, int] | None = None):
+    def _build_audio_info_from_track(self, track: dict, file_sizes: dict[str, int] | None = None, file_crc32: dict[str, str] | None = None):
         filename = track.get("audio")
         if not filename:
             return None
@@ -3968,6 +3968,10 @@ class PlanEditorMainWindow(QMainWindow):
             "reset": bool(track.get("reset", False)),
             "play_once": bool(track.get("play_once", False))
         }
+        if isinstance(file_crc32, dict):
+            crc_value = file_crc32.get(filename)
+            if isinstance(crc_value, str) and crc_value:
+                info["crc32"] = crc_value
         name_value = track.get("name")
         if isinstance(name_value, str) and name_value.strip():
             info["display_name"] = name_value.strip()
@@ -3984,6 +3988,10 @@ class PlanEditorMainWindow(QMainWindow):
                 "duration_ms": 0,
                 "size": sec_size
             }
+            if isinstance(file_crc32, dict):
+                secondary_crc = file_crc32.get(track["audio2"])
+                if isinstance(secondary_crc, str) and secondary_crc:
+                    info["secondary"]["crc32"] = secondary_crc
         return info
 
     def import_tracks_config(self):
@@ -4002,6 +4010,7 @@ class PlanEditorMainWindow(QMainWindow):
             return
 
         file_sizes: dict[str, int] = {}
+        file_crc32: dict[str, str] = {}
         files_section = data.get("files") if isinstance(data, dict) else None
         if isinstance(files_section, list):
             for entry in files_section:
@@ -4015,6 +4024,9 @@ class PlanEditorMainWindow(QMainWindow):
                 except (TypeError, ValueError):
                     continue
                 file_sizes[name] = max(size_value, file_sizes.get(name, 0), 0)
+                crc_value = str(entry.get("crc32", "") or "").strip().lower()
+                if crc_value:
+                    file_crc32[name] = crc_value
 
         prev_state = self.capture_state()
         hall_map = {h.number: h for h in self.halls}
@@ -4039,7 +4051,7 @@ class PlanEditorMainWindow(QMainWindow):
                 track_id = int(entry.get("id"))
             except (TypeError, ValueError):
                 continue
-            audio_info = self._build_audio_info_from_track(entry, file_sizes)
+            audio_info = self._build_audio_info_from_track(entry, file_sizes, file_crc32)
             if not audio_info:
                 continue
             target_hall = None
@@ -4343,6 +4355,7 @@ class PlanEditorMainWindow(QMainWindow):
             return
 
         _, tracks_data = self._prepare_export_payload()
+        self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
         try:
             with open(fp, "w", encoding="utf-8") as f:
                 json.dump(tracks_data, f, ensure_ascii=False, indent=4)
@@ -4354,6 +4367,7 @@ class PlanEditorMainWindow(QMainWindow):
         if self.current_project_file:
             self._sync_auxiliary_configs_from_current_state(show_errors=False)
         rooms_json_text, tracks_data = self._prepare_export_payload()
+        self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
 
         upload_mode, mode_ok = QInputDialog.getItem(
             self,
@@ -4589,8 +4603,9 @@ class PlanEditorMainWindow(QMainWindow):
 
             files_to_upload: list[tuple[str, str, int, str, str]] = [
                 ("bytes", rooms_remote_path, len(rooms_bytes), "rooms.json", "rooms.json"),
-                ("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"),
             ]
+            if not upload_full_project:
+                files_to_upload.append(("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"))
 
             project_file_remote = ""
             local_project_file = ""
@@ -4714,7 +4729,8 @@ class PlanEditorMainWindow(QMainWindow):
                 return ""
             payload = info.get("data")
             if not payload:
-                return ""
+                crc_value = str(info.get("crc32", "") or "").strip().lower()
+                return crc_value
             try:
                 raw_bytes = base64.b64decode(payload.encode("ascii"))
             except Exception:
@@ -4733,7 +4749,7 @@ class PlanEditorMainWindow(QMainWindow):
                 }
                 return
             existing["size"] = max(int(existing.get("size", 0)), max(size_bytes, 0))
-            if crc32_hex and not existing.get("crc32"):
+            if crc32_hex:
                 existing["crc32"] = crc32_hex
 
         def collect_audio_files(info: dict | None):
