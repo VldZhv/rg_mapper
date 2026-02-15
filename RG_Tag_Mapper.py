@@ -2477,6 +2477,7 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_path = self._tracks_json_path()
         if not rooms_path or not tracks_path:
             return False
+        self._recalculate_tracks_files_metadata(tracks_data)
         try:
             with open(rooms_path, "w", encoding="utf-8") as rooms_file:
                 rooms_file.write(rooms_json_text)
@@ -2554,6 +2555,45 @@ class PlanEditorMainWindow(QMainWindow):
             if os.path.isfile(full_path):
                 results.append(full_path)
         return results
+
+    def _recalculate_tracks_files_metadata(self, tracks_data: dict):
+        if not isinstance(tracks_data, dict):
+            return
+        files_section = tracks_data.get("files")
+        if not isinstance(files_section, list):
+            return
+        content_dir = self._get_effective_content_dir()
+        if not content_dir or not os.path.isdir(content_dir):
+            return
+
+        for entry in files_section:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            file_path = os.path.join(content_dir, name)
+            if not os.path.isfile(file_path):
+                continue
+
+            try:
+                size_bytes = os.path.getsize(file_path)
+            except OSError:
+                continue
+
+            crc = 0
+            try:
+                with open(file_path, "rb") as file_handle:
+                    while True:
+                        chunk = file_handle.read(4096)
+                        if not chunk:
+                            break
+                        crc = zlib.crc32(chunk, crc)
+            except OSError:
+                continue
+
+            entry["size"] = int(max(size_bytes, 0))
+            entry["crc32"] = f"{crc & 0xFFFFFFFF:08x}"
 
 
     def _create_actions(self):
