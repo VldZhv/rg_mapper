@@ -50,6 +50,24 @@ def fix_negative_zero(val):
     return 0.0 if abs(val) < 1e-9 else val
 
 
+def _tracks_data_signature(tracks_data: dict) -> str:
+    if not isinstance(tracks_data, dict):
+        return ""
+    normalized = copy.deepcopy(tracks_data)
+    normalized.pop("version", None)
+    return json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _is_tracks_version_valid(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        datetime.strptime(value, "%y%m%d-%H%M")
+    except ValueError:
+        return False
+    return True
+
+
 SETTINGS_ORG = "RG"
 SETTINGS_APP = "RG_Tag_Mapper"
 SETTINGS_LAST_DIR = "paths/last_dir"
@@ -5069,8 +5087,7 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_data = {
             "files": files_list,
             "langs": [],
-            "tracks": track_entries,
-            "version": datetime.now().strftime("%y%m%d")
+            "tracks": track_entries
         }
 
         return rooms_json_text, tracks_data
@@ -5118,50 +5135,59 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
 
     def _merge_existing_tracks_metadata(self, tracks_data: dict):
+        previous_signature = None
+        previous_version = None
         tracks_path = self._tracks_json_path()
-        if not tracks_path or not os.path.isfile(tracks_path):
-            return
-        try:
-            with open(tracks_path, "r", encoding="utf-8") as f:
-                existing_data = json.load(f)
-        except Exception:
-            return
-
-        existing_files = existing_data.get("files") if isinstance(existing_data, dict) else None
-        if not isinstance(existing_files, list):
-            return
-
-        existing_index = {}
-        for item in existing_files:
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            existing_index[name] = item
-
-        for item in tracks_data.get("files", []):
-            if not isinstance(item, dict):
-                continue
-            name = item.get("name")
-            if not isinstance(name, str) or not name:
-                continue
-            old_item = existing_index.get(name)
-            if not isinstance(old_item, dict):
-                continue
-
-            if not item.get("crc32") and old_item.get("crc32"):
-                item["crc32"] = str(old_item.get("crc32", ""))
-
+        if tracks_path and os.path.isfile(tracks_path):
             try:
-                current_size = int(item.get("size") or 0)
-            except (TypeError, ValueError):
-                current_size = 0
-            try:
-                old_size = int(old_item.get("size") or 0)
-            except (TypeError, ValueError):
-                old_size = 0
-            item["size"] = max(current_size, old_size, 0)
+                with open(tracks_path, "r", encoding="utf-8") as f:
+                    existing_data = json.load(f)
+            except Exception:
+                existing_data = None
+
+            if isinstance(existing_data, dict):
+                previous_signature = _tracks_data_signature(existing_data)
+                previous_version = existing_data.get("version")
+
+                existing_files = existing_data.get("files")
+                if isinstance(existing_files, list):
+                    existing_index = {}
+                    for item in existing_files:
+                        if not isinstance(item, dict):
+                            continue
+                        name = item.get("name")
+                        if not isinstance(name, str) or not name:
+                            continue
+                        existing_index[name] = item
+
+                    for item in tracks_data.get("files", []):
+                        if not isinstance(item, dict):
+                            continue
+                        name = item.get("name")
+                        if not isinstance(name, str) or not name:
+                            continue
+                        old_item = existing_index.get(name)
+                        if not isinstance(old_item, dict):
+                            continue
+
+                        if not item.get("crc32") and old_item.get("crc32"):
+                            item["crc32"] = str(old_item.get("crc32", ""))
+
+                        try:
+                            current_size = int(item.get("size") or 0)
+                        except (TypeError, ValueError):
+                            current_size = 0
+                        try:
+                            old_size = int(old_item.get("size") or 0)
+                        except (TypeError, ValueError):
+                            old_size = 0
+                        item["size"] = max(current_size, old_size, 0)
+
+        current_signature = _tracks_data_signature(tracks_data)
+        if previous_signature is not None and current_signature == previous_signature and _is_tracks_version_valid(previous_version):
+            tracks_data["version"] = previous_version
+        else:
+            tracks_data["version"] = datetime.now().strftime("%y%m%d-%H%M")
 
     def closeEvent(self, event):
         self._save_window_preferences()
