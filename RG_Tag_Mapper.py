@@ -385,6 +385,7 @@ class TracksListWidget(QWidget):
         "Номер зала",
         "Доп. ID",
         "Имя",
+        "Языки",
     ]
 
     def __init__(self, mainwindow):
@@ -429,6 +430,7 @@ class TracksListWidget(QWidget):
         header.setSectionResizeMode(5, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(6, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(7, QHeaderView.Interactive)
+        header.setSectionResizeMode(8, QHeaderView.ResizeToContents)
 
         self._adjust_audio_column_width()
         self._adjust_name_column_width()
@@ -495,13 +497,23 @@ class TracksListWidget(QWidget):
         items.sort(key=lambda item: self._normalize_sort_key(item[0]))
         return items
 
+    def _available_language_labels(self, filename: str) -> str:
+        filename = str(filename or "").strip()
+        if not filename:
+            return ""
+        resolver = getattr(self.mainwindow, "_languages_for_audio_filename", None)
+        if not callable(resolver):
+            return ""
+        return ", ".join(resolver(filename))
+
     def _add_proximity_track_item(self, parent_item, proximity_zone):
         info = getattr(proximity_zone, "audio_info", None)
         if not isinstance(info, dict):
             return
         item = QTreeWidgetItem(parent_item)
+        filename = str(info.get('filename', '') or '')
         item.setText(0, f"Зона по приближению {proximity_zone.zone_num}")
-        item.setText(1, str(info.get('filename', '') or ''))
+        item.setText(1, filename)
         item.setText(2, "")
         item.setText(3, "")
         item.setText(4, "")
@@ -513,6 +525,7 @@ class TracksListWidget(QWidget):
         extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
         item.setText(6, ", ".join(str(x) for x in extras))
         item.setText(7, str(info.get('display_name', '') or ''))
+        item.setText(8, self._available_language_labels(filename))
 
         item.setCheckState(2, Qt.Checked if info.get('play_once') else Qt.Unchecked)
         item.setCheckState(3, Qt.Checked if info.get('reset') else Qt.Unchecked)
@@ -526,14 +539,16 @@ class TracksListWidget(QWidget):
             return
         item = QTreeWidgetItem(parent_item)
         title = f"Зал {hall.number}: основной трек" if is_hall_track else f"Зона {track_id}"
+        filename = str(info.get('filename', '') or '')
         item.setText(0, title)
-        item.setText(1, str(info.get('filename', '') or ''))
+        item.setText(1, filename)
         item.setText(2, "")
         item.setText(3, "")
         item.setText(4, "")
         item.setText(5, str(hall.number))
         item.setText(6, "")
         item.setText(7, str(info.get('display_name', '') or ''))
+        item.setText(8, self._available_language_labels(filename))
 
         extras = info.get('extra_ids') if isinstance(info.get('extra_ids'), list) else []
         extras_text = ", ".join(str(x) for x in extras)
@@ -630,7 +645,7 @@ class TracksListWidget(QWidget):
     def _adjust_name_column_width(self):
         header = self.tree.header()
         metrics = header.fontMetrics()
-        label_width = metrics.horizontalAdvance(self.HEADER_LABELS[-1]) + 20
+        label_width = metrics.horizontalAdvance(self.HEADER_LABELS[7]) + 20
 
         max_text_width = 0
 
@@ -2511,6 +2526,7 @@ class PlanEditorMainWindow(QMainWindow):
             return False
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_language_audio_files_into_tracks_data(tracks_data)
         self._merge_existing_tracks_metadata(tracks_data)
         if self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return True
@@ -2573,6 +2589,109 @@ class PlanEditorMainWindow(QMainWindow):
             if os.path.isfile(full_path):
                 results.append(full_path)
         return results
+
+    @staticmethod
+    def _read_audio_file_metadata(file_path: str) -> dict:
+        try:
+            size_bytes = os.path.getsize(file_path)
+        except OSError:
+            size_bytes = 0
+
+        crc = 0
+        crc32_hex = ""
+        try:
+            with open(file_path, "rb") as file_handle:
+                while True:
+                    chunk = file_handle.read(4096)
+                    if not chunk:
+                        break
+                    crc = zlib.crc32(chunk, crc)
+            crc32_hex = f"{crc & 0xFFFFFFFF:08x}"
+        except OSError:
+            crc32_hex = ""
+
+        return {
+            "size": int(max(size_bytes, 0)),
+            "crc32": crc32_hex,
+        }
+
+    def _collect_language_audio_files(self) -> tuple[list[str], dict[str, dict]]:
+        content_dir = self._get_effective_content_dir()
+        if not content_dir or not os.path.isdir(content_dir):
+            return [], {}
+
+        langs: list[str] = []
+        files: dict[str, dict] = {}
+        for lang_name in sorted(os.listdir(content_dir)):
+            if not lang_name or lang_name.startswith("."):
+                continue
+            lang_dir = os.path.join(content_dir, lang_name)
+            if not os.path.isdir(lang_dir):
+                continue
+
+            has_audio = False
+            for entry in sorted(os.listdir(lang_dir)):
+                if not entry.lower().endswith(".mp3"):
+                    continue
+                full_path = os.path.join(lang_dir, entry)
+                if not os.path.isfile(full_path):
+                    continue
+
+                relative_name = f"{lang_name}/{entry}"
+                metadata = self._read_audio_file_metadata(full_path)
+                files[relative_name] = {
+                    "name": relative_name,
+                    "size": metadata["size"],
+                    "crc32": metadata["crc32"],
+                }
+                has_audio = True
+
+            if has_audio:
+                langs.append(lang_name)
+
+        return langs, files
+
+    def _languages_for_audio_filename(self, filename: str) -> list[str]:
+        content_dir = self._get_effective_content_dir()
+        if not content_dir or not os.path.isdir(content_dir):
+            return []
+
+        audio_name = os.path.basename(str(filename or "").replace("\\", "/"))
+        if not audio_name:
+            return []
+
+        langs: list[str] = []
+        for lang_name in sorted(os.listdir(content_dir)):
+            if not lang_name or lang_name.startswith("."):
+                continue
+            lang_dir = os.path.join(content_dir, lang_name)
+            if not os.path.isdir(lang_dir):
+                continue
+            if os.path.isfile(os.path.join(lang_dir, audio_name)):
+                langs.append(lang_name)
+        return langs
+
+    def _merge_language_audio_files_into_tracks_data(self, tracks_data: dict):
+        if not isinstance(tracks_data, dict):
+            return
+
+        langs, language_files = self._collect_language_audio_files()
+        tracks_data["langs"] = langs
+
+        files_index = {
+            str(item.get("name", "")): item
+            for item in tracks_data.get("files", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        for name, meta in language_files.items():
+            existing = files_index.get(name)
+            if existing is None:
+                files_index[name] = meta
+                continue
+            existing["size"] = int(meta.get("size", 0))
+            existing["crc32"] = str(meta.get("crc32", "") or "")
+
+        tracks_data["files"] = [files_index[name] for name in sorted(files_index)]
 
     def _recalculate_tracks_files_metadata(self, tracks_data: dict):
         if not isinstance(tracks_data, dict):
@@ -2917,6 +3036,8 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_toggle_tracks_dock.blockSignals(True)
         self.action_toggle_tracks_dock.setChecked(visible)
         self.action_toggle_tracks_dock.blockSignals(False)
+        if visible:
+            self.populate_tracks_table()
 
     def _load_readme_text(self) -> str | None:
         if self._cached_readme_text is not None:
@@ -3756,6 +3877,7 @@ class PlanEditorMainWindow(QMainWindow):
         remember_last_used_path(self.current_project_file)
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_language_audio_files_into_tracks_data(tracks_data)
         self._merge_existing_tracks_metadata(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return False
@@ -4284,15 +4406,20 @@ class PlanEditorMainWindow(QMainWindow):
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self.unmatched_audio_files = self._normalize_unmatched_audio_files(unmatched_files)
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_language_audio_files_into_tracks_data(tracks_data)
         self._merge_existing_tracks_metadata(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return
+        self.populate_tracks_table()
 
         message_lines = [
             f"Назначено треков залам: {assigned_halls}",
             f"Назначено треков зонам: {assigned_zones}",
             f"Файл tracks.json обновлён: {self._tracks_json_path()}",
         ]
+        langs = tracks_data.get("langs", [])
+        if langs:
+            message_lines.append("Языковые папки: " + ", ".join(str(lang) for lang in langs))
         if unmatched:
             message_lines.append("Без соответствия: " + ", ".join(unmatched))
         QMessageBox.information(self, "Обновить аудио", "\n".join(message_lines))
@@ -4389,6 +4516,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.project_root_dir = None
         self.project_content_dir = None
         self._ensure_project_layout_for_current_file()
+        self.populate_tracks_table()
         self.statusBar().showMessage("Проект успешно загружен.", 5000)
         self.push_undo_state(prev_state)
         self._mark_state_as_saved()
@@ -4417,6 +4545,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         _, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_language_audio_files_into_tracks_data(tracks_data)
         self._merge_existing_tracks_metadata(tracks_data)
         try:
             with open(fp, "w", encoding="utf-8") as f:
@@ -4430,6 +4559,7 @@ class PlanEditorMainWindow(QMainWindow):
             self._sync_auxiliary_configs_from_current_state(show_errors=False)
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
+        self._merge_language_audio_files_into_tracks_data(tracks_data)
         self._merge_existing_tracks_metadata(tracks_data)
 
         upload_mode, mode_ok = QInputDialog.getItem(
