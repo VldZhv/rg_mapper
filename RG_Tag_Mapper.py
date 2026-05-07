@@ -1,5 +1,5 @@
 ﻿# RG_Tag_Mapper.py — fixed context menus, anchor priority, Z in meters on add, multi_id only with extras
-import sys, math, json, base64, os, copy, posixpath, zlib
+import sys, math, json, base64, os, copy, posixpath, zlib, stat
 import paramiko
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QGraphicsView, QGraphicsScene, QGraphicsItem,
@@ -7,7 +7,8 @@ from PySide6.QtWidgets import (
     QTreeWidgetItem, QDockWidget, QFileDialog, QToolBar, QMessageBox, QDialog,
     QFormLayout, QDialogButtonBox, QSpinBox, QDoubleSpinBox, QLineEdit, QComboBox,
     QLabel, QInputDialog, QCheckBox, QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView, QProgressDialog
+    QGroupBox, QStyle, QTextBrowser, QHeaderView, QAbstractItemView, QProgressDialog,
+    QTabWidget, QScrollArea, QListWidget
 )
 from PySide6.QtGui import (
     QAction, QPainter, QPen, QBrush, QColor, QPixmap, QPainterPath, QFont,
@@ -71,6 +72,9 @@ def _is_tracks_version_valid(value) -> bool:
 SETTINGS_ORG = "RG"
 SETTINGS_APP = "RG_Tag_Mapper"
 SETTINGS_LAST_DIR = "paths/last_dir"
+SYSTEM_CONFIG_FILENAMES = ("config.json", "defconfig.json", "excurs.json", "settings.json")
+DEFAULT_REMOTE_PROJECTS_DIR = "/ftpradiog"
+REMOTE_SERVICE_PROJECT_DIRS = {"hpbuf", "default", "ENRG", "esp_default"}
 
 
 def app_settings() -> QSettings:
@@ -393,6 +397,7 @@ class TracksListWidget(QWidget):
         self.mainwindow = mainwindow
         self._updating = False
         self._pending_snapshot = None
+        self._refresh_queued = False
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -401,7 +406,8 @@ class TracksListWidget(QWidget):
         self.tree.setColumnCount(len(self.HEADER_LABELS))
         self.tree.setHeaderLabels(self.HEADER_LABELS)
         self.tree.setAlternatingRowColors(True)
-        self.tree.setRootIsDecorated(True)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setIndentation(0)
         self.tree.setEditTriggers(
             QAbstractItemView.EditTrigger.DoubleClicked |
             QAbstractItemView.EditTrigger.SelectedClicked
@@ -410,6 +416,28 @@ class TracksListWidget(QWidget):
         self.tree.setStyleSheet(
             """
             QTreeWidget { background-color: transparent; }
+            QTreeWidget::item {
+                selection-background-color: rgba(235, 235, 235, 120);
+                selection-color: #000000;
+            }
+            QTreeWidget::item:hover {
+                background-color: rgba(235, 235, 235, 120);
+            }
+            QTreeWidget::item:selected,
+            QTreeWidget::item:selected:active,
+            QTreeWidget::item:selected:!active {
+                background-color: rgba(235, 235, 235, 120);
+                color: #000000;
+            }
+            QTreeWidget::branch:hover,
+            QTreeWidget::branch:selected,
+            QTreeWidget::branch:selected:active,
+            QTreeWidget::branch:selected:!active {
+                background: transparent;
+                background-color: transparent;
+                image: none;
+                border: none;
+            }
             QTreeWidget QLineEdit {
                 background-color: #ffffff;
                 color: #000000;
@@ -448,7 +476,7 @@ class TracksListWidget(QWidget):
                 key=lambda h: self._normalize_sort_key(getattr(h, "number", 0))
             )
             for hall in halls:
-                hall_title = f"Зал {hall.number}"
+                hall_title = f"▾ Зал {hall.number}"
                 if hall.name:
                     hall_title += f" — {hall.name}"
                 hall_item = QTreeWidgetItem([hall_title])
@@ -466,7 +494,7 @@ class TracksListWidget(QWidget):
 
             proximity_tracks = [pz for pz in getattr(self.mainwindow, "proximity_zones", []) if isinstance(getattr(pz, "audio_info", None), dict)]
             if proximity_tracks:
-                proximity_root = QTreeWidgetItem(["Зоны по приближению"])
+                proximity_root = QTreeWidgetItem(["▾ Зоны по приближению"])
                 proximity_root.setData(0, Qt.UserRole, {"type": "proximity_root"})
                 proximity_root.setFlags(Qt.ItemIsEnabled | Qt.ItemIsSelectable)
                 self.tree.addTopLevelItem(proximity_root)
@@ -512,7 +540,7 @@ class TracksListWidget(QWidget):
             return
         item = QTreeWidgetItem(parent_item)
         filename = str(info.get('filename', '') or '')
-        item.setText(0, f"Зона по приближению {proximity_zone.zone_num}")
+        item.setText(0, f"    Зона по приближению {proximity_zone.zone_num}")
         item.setText(1, filename)
         item.setText(2, "")
         item.setText(3, "")
@@ -539,6 +567,7 @@ class TracksListWidget(QWidget):
             return
         item = QTreeWidgetItem(parent_item)
         title = f"Зал {hall.number}: основной трек" if is_hall_track else f"Зона {track_id}"
+        title = f"    {title}"
         filename = str(info.get('filename', '') or '')
         item.setText(0, title)
         item.setText(1, filename)
@@ -629,11 +658,24 @@ class TracksListWidget(QWidget):
         else:
             changed = False
 
-        self.refresh()
         if changed:
             self._commit_snapshot()
+            self._queue_refresh()
         else:
             self._pending_snapshot = None
+
+    def _queue_refresh(self):
+        if self._refresh_queued:
+            return
+        self._refresh_queued = True
+        scroll_value = self.tree.verticalScrollBar().value()
+
+        def _run_refresh():
+            self._refresh_queued = False
+            self.refresh()
+            QTimer.singleShot(0, lambda: self.tree.verticalScrollBar().setValue(scroll_value))
+
+        QTimer.singleShot(0, _run_refresh)
 
     def _adjust_audio_column_width(self):
         header = self.tree.header()
@@ -2497,6 +2539,162 @@ class PlanEditorMainWindow(QMainWindow):
         project_dir = os.path.dirname(project_file_abs)
         return os.path.join(project_dir, "rooms.json")
 
+    def _system_config_dir(self):
+        if not self.current_project_file:
+            return None
+        return os.path.dirname(os.path.abspath(self.current_project_file))
+
+    def _system_config_path(self, filename: str):
+        config_dir = self._system_config_dir()
+        if not config_dir:
+            return None
+        return os.path.join(config_dir, filename)
+
+    def _system_config_paths(self) -> dict[str, str]:
+        config_dir = self._system_config_dir()
+        if not config_dir:
+            return {}
+        return {filename: os.path.join(config_dir, filename) for filename in SYSTEM_CONFIG_FILENAMES}
+
+    def _project_label_for_configs(self) -> str:
+        project_name = getattr(self, "project_name", "")
+        if isinstance(project_name, str) and project_name.strip():
+            return project_name.strip()
+        if self.current_project_file:
+            base_name = os.path.splitext(os.path.basename(self.current_project_file))[0]
+            if base_name:
+                return base_name
+        return "project"
+
+    def _default_system_configs(self) -> dict[str, dict]:
+        project_label = self._project_label_for_configs()
+        return {
+            "config.json": {
+                "network": {
+                    "addr": "192.168.11.250",
+                    "port": 21,
+                },
+                "wifi": {
+                    "ssid": "brainslug",
+                    "password": "swinoferma",
+                },
+                "network_2": {
+                    "addr": "dev.test.motz.studio",
+                    "port": 21,
+                },
+                "wifi_2": {
+                    "ssid": "RG_Update",
+                    "password": "standardstory",
+                },
+                "flags": {
+                    "some_flag": False,
+                },
+            },
+            "defconfig.json": {
+                "expo": project_label,
+            },
+            "excurs.json": {
+                "excursions": [
+                    {
+                        "name": project_label,
+                        "code": 1,
+                        "path": project_label,
+                    }
+                ]
+            },
+            "settings.json": {
+                "common_sp": {
+                    "mode": "hybrid",
+                    "def_reset_en": True,
+                    "make_def_reset": False,
+                    "room_order_en": False,
+                    "room_search_en": True,
+                    "btn_extras_en": False,
+                },
+                "coord_sp": {
+                    "human_height": 130,
+                    "anch_period": 377,
+                    "anch_deviation": 34,
+                    "save_coords_en": True,
+                    "zone_playonce_tmout": 120000,
+                },
+                "audio_sp": {
+                    "bitrate": 320,
+                    "channels": 2,
+                    "fade_down_ms": 120,
+                    "fade_up_ms": 120,
+                    "def_volume": 80,
+                    "position_save": 10,
+                    "position_back": 5,
+                },
+            },
+        }
+
+    def _load_system_config(self, filename: str):
+        path = self._system_config_path(filename)
+        if not path or not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as config_file:
+                data = json.load(config_file)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _load_existing_system_configs(self) -> dict[str, dict]:
+        configs = {}
+        for filename in SYSTEM_CONFIG_FILENAMES:
+            data = self._load_system_config(filename)
+            if isinstance(data, dict):
+                configs[filename] = data
+        return configs
+
+    def _has_any_system_config(self) -> bool:
+        return bool(self._load_existing_system_configs())
+
+    def _write_system_configs(self, configs: dict[str, dict]) -> bool:
+        config_dir = self._system_config_dir()
+        if not config_dir:
+            return False
+        try:
+            os.makedirs(config_dir, exist_ok=True)
+            for filename, data in configs.items():
+                if filename not in SYSTEM_CONFIG_FILENAMES or not isinstance(data, dict):
+                    continue
+                path = os.path.join(config_dir, filename)
+                with open(path, "w", encoding="utf-8") as config_file:
+                    json.dump(data, config_file, ensure_ascii=False, indent=4)
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка", f"Не удалось сохранить настройки проекта:\n{exc}")
+            return False
+        return True
+
+    def _create_default_system_configs(self, overwrite: bool = False) -> bool:
+        config_dir = self._system_config_dir()
+        if not config_dir:
+            return False
+        defaults = self._default_system_configs()
+        to_write = {}
+        for filename, data in defaults.items():
+            path = os.path.join(config_dir, filename)
+            if overwrite or not os.path.isfile(path):
+                to_write[filename] = data
+        if not to_write:
+            return True
+        return self._write_system_configs(to_write)
+
+    @staticmethod
+    def _merge_dict_defaults(defaults, existing):
+        merged = copy.deepcopy(defaults)
+        if not isinstance(existing, dict):
+            return merged
+        for key, value in existing.items():
+            if isinstance(value, dict) and isinstance(merged.get(key), dict):
+                merged[key] = PlanEditorMainWindow._merge_dict_defaults(merged[key], value)
+            else:
+                merged[key] = copy.deepcopy(value)
+        return merged
+
     def _tracks_json_path(self):
         content_dir = self._get_effective_content_dir()
         if not content_dir:
@@ -2804,6 +3002,13 @@ class PlanEditorMainWindow(QMainWindow):
         )
         self.action_upload.triggered.connect(self.upload_config_to_server)
 
+        self.action_download_project = QAction(
+            load_icon("load.png", QStyle.SP_ArrowDown),
+            "Загрузить проект с сервера",
+            self,
+        )
+        self.action_download_project.triggered.connect(self.download_project_from_server)
+
         self.action_pdf = QAction(
             load_icon("pdf.png", QStyle.SP_FileDialogDetailedView),
             "Сохранить в PDF",
@@ -2893,6 +3098,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addAction(self.action_export)
         file_menu.addAction(self.action_refresh_audio)
         file_menu.addAction(self.action_upload)
+        file_menu.addAction(self.action_download_project)
         file_menu.addAction(self.action_pdf)
 
         edit_menu = menu_bar.addMenu("Правка")
@@ -2954,6 +3160,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
         file_toolbar.addAction(self.action_upload)
+        file_toolbar.addAction(self.action_download_project)
         file_toolbar.addAction(self.action_pdf)
         self.addToolBar(file_toolbar)
         self.file_toolbar = file_toolbar
@@ -3888,27 +4095,338 @@ class PlanEditorMainWindow(QMainWindow):
     def show_project_properties_dialog(self):
         dialog = QDialog(self)
         dialog.setWindowTitle("Свойства проекта")
-        form = QFormLayout(dialog)
+        dialog.resize(620, 640)
+        layout = QVBoxLayout(dialog)
+
+        general_group = QGroupBox("Свойства проекта", dialog)
+        general_form = QFormLayout(general_group)
 
         name_edit = QLineEdit(dialog)
         name_edit.setPlaceholderText("Имя проекта (опционально)")
         if self.project_name:
             name_edit.setText(self.project_name)
-        form.addRow("Имя:", name_edit)
+        general_form.addRow("Имя:", name_edit)
+        layout.addWidget(general_group)
+
+        existing_configs = self._load_existing_system_configs()
+        editing_system_configs = bool(existing_configs)
+        system_widgets: dict[tuple[str, str], QWidget] = {}
+        readonly_system_widgets: dict[tuple[str, str], QWidget] = {}
+        initial_system_configs_snapshot = {"value": None}
+        system_notice = QLabel(dialog)
+        system_notice.setWordWrap(True)
+        layout.addWidget(system_notice)
+        system_tabs = QTabWidget(dialog)
+        layout.addWidget(system_tabs, 1)
+
+        def _clear_layout(target_layout):
+            while target_layout.count():
+                item = target_layout.takeAt(0)
+                widget = item.widget()
+                child_layout = item.layout()
+                if widget is not None:
+                    widget.deleteLater()
+                elif child_layout is not None:
+                    _clear_layout(child_layout)
+
+        def _make_text(value):
+            widget = QLineEdit(dialog)
+            widget.setText(str(value or ""))
+            return widget
+
+        def _make_int(value):
+            widget = QSpinBox(dialog)
+            widget.setRange(-2147483648, 2147483647)
+            widget.wheelEvent = lambda event: event.ignore()
+            try:
+                widget.setValue(int(value))
+            except (TypeError, ValueError, OverflowError):
+                widget.setValue(0)
+            return widget
+
+        def _make_bool(value):
+            widget = QCheckBox(dialog)
+            widget.setChecked(bool(value))
+            return widget
+
+        def _make_mode(value):
+            widget = QComboBox(dialog)
+            for value_id, label in (
+                ("coords", "по координатам"),
+                ("beacons", "по приближению"),
+                ("hybrid", "гибридный"),
+            ):
+                widget.addItem(label, value_id)
+            index = widget.findText(str(value or ""))
+            if index < 0:
+                index = widget.findData(str(value or ""))
+            widget.setCurrentIndex(index if index >= 0 else 0)
+            return widget
+
+        settings_descriptions = {
+            "common_sp.mode": "Режим навигации устройства: по координатам, по приближению, гибридный.",
+            "common_sp.def_reset_en": "Разрешить сброс к заводским настройкам.",
+            "common_sp.make_def_reset": "Принудительный сброс к заводским настройкам при подключении к серверу.",
+            "common_sp.room_search_en": "Разрешить переход в режим поиска при малом количестве данных.",
+            "common_sp.btn_extras_en": "Разрешить системные комбинации кнопок: выключение, перезагрузка, сброс.",
+            "common_sp.room_to_sleep": "При переходе в комнату с этим номером устройство автоматически уснет.",
+            "coord_sp.human_height": "Рост человека, используется на переходных якорях.",
+            "coord_sp.anch_period": "Минимальный период опроса якорей в мсек, реальный зависит ещё от anch_deviation.",
+            "coord_sp.anch_deviation": "Случайный разброс в мсек при опросе якоря.",
+            "coord_sp.save_coords_en": "Разрешить плееру логгировать координаты в память.",
+            "coord_sp.zone_playonce_tmout": "Таймаут повторного входа в playonce зону. Если 0, таймаут отключается.",
+            "audio_sp.def_volume": "Громкость по умолчанию в процентах.",
+            "audio_sp.position_save": "Минимальный порог сохранения таймкода в секундах.",
+            "audio_sp.position_back": "Уставка перемотки трека назад при возвращении в зону.",
+            "audio_sp.bitrate": "Битрейт CBR mp3 файла.",
+            "audio_sp.channels": "Количество каналов в mp3 файле.",
+            "audio_sp.fade_down_ms": "Длительность фэйда на включение в мсек.",
+            "audio_sp.fade_up_ms": "Длительность фэйда на выключение в мсек.",
+        }
+
+        def _add_comment(target_layout, description):
+            if not description:
+                return
+            desc_label = QLabel(description, dialog)
+            desc_label.setWordWrap(True)
+            desc_label.setStyleSheet("color: #666666; font-size: 10px;")
+            desc_label.setMinimumWidth(1)
+            target_layout.addWidget(desc_label)
+
+        def _add_field(form_layout, filename, key, label, value, kind="text", readonly=False):
+            if kind == "bool":
+                widget = _make_bool(value)
+            elif kind == "int":
+                widget = _make_int(value)
+            elif kind == "mode":
+                widget = _make_mode(value)
+            else:
+                widget = _make_text(value)
+            widget.setEnabled(not readonly)
+            form_layout.addRow(label, widget)
+            if not readonly:
+                system_widgets[(filename, key)] = widget
+            else:
+                readonly_system_widgets[(filename, key)] = widget
+
+        def _add_setting_field(parent_layout, filename, key, label, value, kind="text", readonly=False):
+            form_layout = QFormLayout()
+            _add_field(form_layout, filename, key, label, value, kind, readonly)
+            parent_layout.addLayout(form_layout)
+            _add_comment(parent_layout, settings_descriptions.get(key))
+
+        def _add_scroll_tab(title):
+            scroll = QScrollArea(dialog)
+            scroll.setWidgetResizable(True)
+            tab = QWidget(scroll)
+            tab_layout = QVBoxLayout(tab)
+            tab_layout.setContentsMargins(8, 8, 8, 8)
+            scroll.setWidget(tab)
+            system_tabs.addTab(scroll, title)
+            return tab_layout
+
+        def _render_system_editor():
+            system_tabs.clear()
+            system_widgets.clear()
+            readonly_system_widgets.clear()
+
+            if not editing_system_configs:
+                system_notice.setText("Настройки")
+                empty_tab = QWidget(dialog)
+                empty_layout = QVBoxLayout(empty_tab)
+                add_button = QPushButton("Добавить настройки проекта", empty_tab)
+
+                def _enable_defaults():
+                    nonlocal editing_system_configs, existing_configs
+                    if not self.current_project_file:
+                        QMessageBox.warning(dialog, "Настройки проекта", "Сначала сохраните проект.")
+                        return
+                    existing_configs = self._default_system_configs()
+                    project_label = name_edit.text().strip() or self._project_label_for_configs()
+                    existing_configs["defconfig.json"]["expo"] = project_label
+                    existing_configs["excurs.json"]["excursions"][0]["name"] = project_label
+                    existing_configs["excurs.json"]["excursions"][0]["path"] = project_label
+                    if not self._write_system_configs(existing_configs):
+                        return
+                    editing_system_configs = True
+                    _render_system_editor()
+
+                add_button.clicked.connect(_enable_defaults)
+                empty_layout.addWidget(add_button)
+                empty_layout.addStretch(1)
+                system_tabs.addTab(empty_tab, "Настройки")
+                return
+
+            system_notice.setText("Настройки")
+            defaults = self._default_system_configs()
+            configs = {
+                filename: self._merge_dict_defaults(defaults.get(filename, {}), existing_configs.get(filename, {}))
+                for filename in SYSTEM_CONFIG_FILENAMES
+            }
+            existing_configs.clear()
+            existing_configs.update(configs)
+
+            network_layout = _add_scroll_tab("Сетевые настройки")
+            config_group = QGroupBox("config.json", dialog)
+            config_form = QFormLayout(config_group)
+            config_data = configs["config.json"]
+            _add_field(config_form, "config.json", "network.addr", "Основной FTP адрес", config_data["network"].get("addr"))
+            _add_field(config_form, "config.json", "network.port", "Основной FTP порт", config_data["network"].get("port"), "int")
+            _add_field(config_form, "config.json", "wifi.ssid", "Основной Wi-Fi SSID", config_data["wifi"].get("ssid"))
+            _add_field(config_form, "config.json", "wifi.password", "Основной Wi-Fi пароль", config_data["wifi"].get("password"))
+            _add_field(config_form, "config.json", "network_2.addr", "Резервный FTP адрес", config_data["network_2"].get("addr"))
+            _add_field(config_form, "config.json", "network_2.port", "Резервный FTP порт", config_data["network_2"].get("port"), "int")
+            _add_field(config_form, "config.json", "wifi_2.ssid", "Резервный Wi-Fi SSID", config_data["wifi_2"].get("ssid"))
+            _add_field(config_form, "config.json", "wifi_2.password", "Резервный Wi-Fi пароль", config_data["wifi_2"].get("password"))
+            network_layout.addWidget(config_group)
+            network_layout.addStretch(1)
+
+            structure_layout = _add_scroll_tab("Структура проекта")
+            defconfig_group = QGroupBox("defconfig.json", dialog)
+            defconfig_form = QFormLayout(defconfig_group)
+            _add_field(defconfig_form, "defconfig.json", "expo", "Выставка по умолчанию", configs["defconfig.json"].get("expo"))
+            structure_layout.addWidget(defconfig_group)
+
+            excurs_group = QGroupBox("excurs.json", dialog)
+            excurs_form = QFormLayout(excurs_group)
+            excursion = {}
+            excursions = configs["excurs.json"].get("excursions")
+            if isinstance(excursions, list) and excursions and isinstance(excursions[0], dict):
+                excursion = excursions[0]
+            _add_field(excurs_form, "excurs.json", "excursions.0.name", "Название экскурсии", excursion.get("name"))
+            _add_field(excurs_form, "excurs.json", "excursions.0.code", "Код выставки", excursion.get("code"), "int")
+            _add_field(excurs_form, "excurs.json", "excursions.0.path", "Путь экскурсии", excursion.get("path"))
+            structure_layout.addWidget(excurs_group)
+            structure_layout.addStretch(1)
+
+            common_settings_layout = _add_scroll_tab("Общие настройки")
+            settings_data = configs["settings.json"]
+            common_group = QGroupBox("common_sp", dialog)
+            common_layout = QVBoxLayout(common_group)
+            common = settings_data["common_sp"]
+            _add_setting_field(common_layout, "settings.json", "common_sp.mode", "mode", common.get("mode"), "mode")
+            _add_setting_field(common_layout, "settings.json", "common_sp.def_reset_en", "def_reset_en", common.get("def_reset_en"), "bool")
+            _add_setting_field(common_layout, "settings.json", "common_sp.make_def_reset", "make_def_reset", common.get("make_def_reset"), "bool", readonly=True)
+            _add_setting_field(common_layout, "settings.json", "common_sp.room_order_en", "room_order_en", common.get("room_order_en"), "bool", readonly=True)
+            _add_setting_field(common_layout, "settings.json", "common_sp.room_search_en", "room_search_en", common.get("room_search_en"), "bool")
+            _add_setting_field(common_layout, "settings.json", "common_sp.btn_extras_en", "btn_extras_en", common.get("btn_extras_en"), "bool")
+            if "room_to_sleep" in common:
+                _add_setting_field(common_layout, "settings.json", "common_sp.room_to_sleep", "room_to_sleep", common.get("room_to_sleep"), "int")
+            common_settings_layout.addWidget(common_group)
+
+            coord_group = QGroupBox("coord_sp", dialog)
+            coord_layout = QVBoxLayout(coord_group)
+            coord = settings_data["coord_sp"]
+            for key in ("human_height", "anch_period", "anch_deviation", "zone_playonce_tmout"):
+                dotted = f"coord_sp.{key}"
+                _add_setting_field(coord_layout, "settings.json", dotted, key, coord.get(key), "int")
+            _add_setting_field(coord_layout, "settings.json", "coord_sp.save_coords_en", "save_coords_en", coord.get("save_coords_en"), "bool")
+            common_settings_layout.addWidget(coord_group)
+            common_settings_layout.addStretch(1)
+
+            playback_layout = _add_scroll_tab("Настройки воспроизведения")
+            audio_group = QGroupBox("audio_sp", dialog)
+            audio_layout = QVBoxLayout(audio_group)
+            audio = settings_data["audio_sp"]
+            for key in ("def_volume", "position_save", "position_back", "bitrate", "channels", "fade_down_ms", "fade_up_ms"):
+                dotted = f"audio_sp.{key}"
+                _add_setting_field(audio_layout, "settings.json", dotted, key, audio.get(key), "int")
+            playback_layout.addWidget(audio_group)
+            playback_layout.addStretch(1)
+
+        def _value_from_widget(widget):
+            if isinstance(widget, QCheckBox):
+                return widget.isChecked()
+            if isinstance(widget, QSpinBox):
+                return widget.value()
+            if isinstance(widget, QComboBox):
+                value = widget.currentData()
+                return value if value is not None else widget.currentText()
+            if isinstance(widget, QLineEdit):
+                return widget.text().strip()
+            return None
+
+        def _set_path(data, dotted_key, value):
+            parts = dotted_key.split(".")
+            current = data
+            for part in parts[:-1]:
+                if part.isdigit():
+                    current = current[int(part)]
+                else:
+                    current = current.setdefault(part, {})
+            last = parts[-1]
+            if last.isdigit():
+                current[int(last)] = value
+            else:
+                current[last] = value
+
+        def _collect_system_configs_from_widgets():
+            defaults = self._default_system_configs()
+            configs = {
+                filename: self._merge_dict_defaults(defaults.get(filename, {}), existing_configs.get(filename, {}))
+                for filename in SYSTEM_CONFIG_FILENAMES
+            }
+            for (filename, key), widget in system_widgets.items():
+                _set_path(configs[filename], key, _value_from_widget(widget))
+            return configs
+
+        def _current_properties_snapshot():
+            return {
+                "project_name": name_edit.text().strip(),
+                "system_configs": _collect_system_configs_from_widgets() if editing_system_configs else None,
+            }
+
+        _render_system_editor()
+        initial_snapshot = copy.deepcopy(_current_properties_snapshot())
+
+        def _has_dialog_changes():
+            return _current_properties_snapshot() != initial_snapshot
+
+        def _accept_dialog():
+            if _has_dialog_changes():
+                reply = QMessageBox.question(
+                    dialog,
+                    "Сохранить изменения?",
+                    "Сохранить изменения?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            dialog.accept()
+
+        def _reject_dialog():
+            if _has_dialog_changes():
+                reply = QMessageBox.question(
+                    dialog,
+                    "Сбросить изменения?",
+                    "Сбросить изменения?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            dialog.reject()
 
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form.addRow(buttons)
+        buttons.accepted.connect(_accept_dialog)
+        buttons.rejected.connect(_reject_dialog)
+        layout.addWidget(buttons)
 
         if dialog.exec() != QDialog.Accepted:
             return
 
         self.project_name = name_edit.text().strip()
         self._update_window_title()
+        if editing_system_configs:
+            if not self.current_project_file:
+                QMessageBox.warning(self, "Настройки проекта", "Настройки проекта не сохранены: сначала сохраните проект.")
+                return
+            self._write_system_configs(_collect_system_configs_from_widgets())
 
     def save_project(self):
         target = self.current_project_file
+        creating_new_project = not bool(target)
         if not target:
             requested = self._request_new_project_destination()
             if not requested:
@@ -3920,6 +4438,8 @@ class PlanEditorMainWindow(QMainWindow):
         data = self._collect_project_data()
         if self._save_project_file(target, data):
             self.current_project_file = os.path.abspath(target)
+            if creating_new_project:
+                self._create_default_system_configs(overwrite=False)
             self._mark_state_as_saved()
             return True
         return False
@@ -3934,6 +4454,7 @@ class PlanEditorMainWindow(QMainWindow):
         data = self._collect_project_data()
         if self._save_project_file(fp, data):
             self.current_project_file = os.path.abspath(fp)
+            self._create_default_system_configs(overwrite=False)
             self._mark_state_as_saved()
             return True
         return False
@@ -4431,6 +4952,9 @@ class PlanEditorMainWindow(QMainWindow):
             return
         fp,_ = choose_open_file(self,"Загрузить проект", get_last_used_directory(),"*.proj")
         if not fp: return
+        self._load_project_file(fp)
+
+    def _load_project_file(self, fp: str):
         prev_state = self.capture_state()
         try:
             with open(fp,"r",encoding="utf-8") as f:
@@ -4554,6 +5078,289 @@ class PlanEditorMainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
+    def download_project_from_server(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Загрузка проекта с сервера")
+        form_layout = QFormLayout(dialog)
+
+        host_edit = QLineEdit(dialog)
+        host_edit.setPlaceholderText("example.com")
+        host_edit.setText("178.154.195.218")
+        form_layout.addRow("Хост:", host_edit)
+
+        login_edit = QLineEdit(dialog)
+        login_edit.setPlaceholderText("user")
+        login_edit.setText("radiog")
+        form_layout.addRow("Логин:", login_edit)
+
+        remote_dir_edit = QLineEdit(dialog)
+        remote_dir_edit.setText(DEFAULT_REMOTE_PROJECTS_DIR)
+        form_layout.addRow("Каталог проектов:", remote_dir_edit)
+
+        port_spin = QSpinBox(dialog)
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(26015)
+        form_layout.addRow("Порт:", port_spin)
+
+        password_edit = QLineEdit(dialog)
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
+        form_layout.addRow("Пароль к ключу:", password_edit)
+
+        key_widget = QWidget(dialog)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_path_edit = QLineEdit(key_widget)
+        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        preferred_key_path = os.path.join(app_root, "id_rsa")
+        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
+        if not default_key_path:
+            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
+        if default_key_path:
+            key_path_edit.setText(default_key_path)
+        key_layout.addWidget(key_path_edit)
+
+        browse_button = QPushButton("Обзор…", key_widget)
+
+        def browse_key_file():
+            filename, _ = choose_open_file(
+                self,
+                "Выберите приватный ключ SSH",
+                os.path.expanduser("~/.ssh"),
+                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh)",
+            )
+            if filename:
+                key_path_edit.setText(filename)
+
+        browse_button.clicked.connect(browse_key_file)
+        key_layout.addWidget(browse_button)
+        form_layout.addRow("Файл ключа:", key_widget)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        form_layout.addRow(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        host = host_edit.text().strip()
+        username = login_edit.text().strip()
+        remote_root = remote_dir_edit.text().replace("\\", "/").strip() or DEFAULT_REMOTE_PROJECTS_DIR
+        key_path = key_path_edit.text().strip()
+        port = port_spin.value()
+        passphrase = password_edit.text() or None
+
+        if not host or not username or not key_path:
+            QMessageBox.warning(self, "Загрузка проекта с сервера", "Заполните хост, логин и путь к ключу для подключения.")
+            return
+
+        try:
+            with open(key_path, "rb") as _key_file:
+                _key_file.read(1)
+        except Exception as exc:
+            QMessageBox.critical(self, "Загрузка проекта с сервера", f"Не удалось открыть файл ключа:\n{exc}")
+            return
+
+        try:
+            key_obj = None
+            if key_path.lower().endswith(".ppk"):
+                import importlib.util
+                if importlib.util.find_spec("paramiko.ppk") is not None:
+                    from paramiko.ppk import PPKKey as _PPKKey
+                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
+                elif importlib.util.find_spec("paramiko_ppk") is not None:
+                    from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
+                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
+                else:
+                    raise ModuleNotFoundError("Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk.")
+            else:
+                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
+        except Exception as exc:
+            QMessageBox.critical(self, "Загрузка проекта с сервера", f"Не удалось загрузить SSH-ключ:\n{exc}")
+            return
+
+        ssh = None
+        sftp = None
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(hostname=host, port=port, username=username, pkey=key_obj, allow_agent=False, look_for_keys=False)
+            sftp = ssh.open_sftp()
+
+            remote_root_normalized = sftp.normalize(remote_root)
+            project_names = []
+            for entry in sftp.listdir_attr(remote_root_normalized):
+                name = entry.filename
+                if name in REMOTE_SERVICE_PROJECT_DIRS:
+                    continue
+                mode = entry.st_mode or 0
+                if stat.S_ISDIR(mode):
+                    project_names.append(name)
+
+            project_names.sort(key=lambda value: value.lower())
+            if not project_names:
+                QMessageBox.information(self, "Загрузка проекта с сервера", "Доступные проекты не найдены.")
+                return
+
+            projects_dialog = QDialog(self)
+            projects_dialog.setWindowTitle("Загрузка проекта с сервера")
+            projects_layout = QVBoxLayout(projects_dialog)
+            projects_layout.addWidget(QLabel("Выберите проект:", projects_dialog))
+            projects_list = QListWidget(projects_dialog)
+            projects_list.addItems(project_names)
+            projects_list.setMinimumWidth(360)
+            projects_list.setMinimumHeight(max(180, len(project_names) * 24 + 12))
+            if project_names:
+                projects_list.setCurrentRow(0)
+            projects_layout.addWidget(projects_list)
+            project_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, projects_dialog)
+            project_buttons.accepted.connect(projects_dialog.accept)
+            project_buttons.rejected.connect(projects_dialog.reject)
+            projects_layout.addWidget(project_buttons)
+            projects_list.itemDoubleClicked.connect(lambda _item: projects_dialog.accept())
+
+            if projects_dialog.exec() != QDialog.Accepted or not projects_list.currentItem():
+                return
+            project_name = projects_list.currentItem().text()
+
+            destination_root = choose_directory(self, "Выберите папку для сохранения проекта", get_last_used_directory())
+            if not destination_root:
+                return
+
+            local_project_dir = os.path.join(destination_root, self._sanitize_name_for_folder(project_name) or project_name)
+            if os.path.exists(local_project_dir):
+                reply = QMessageBox.question(
+                    self,
+                    "Загрузка проекта с сервера",
+                    f"Папка уже существует:\n{local_project_dir}\n\nСуществующие файлы могут быть перезаписаны. Продолжить?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.No,
+                )
+                if reply != QMessageBox.Yes:
+                    return
+
+            remote_project_dir = posixpath.join(remote_root_normalized, project_name)
+
+            remote_files: list[tuple[str, str, int]] = []
+
+            def collect_remote_files(remote_dir: str, relative_dir: str = ""):
+                for remote_entry in sftp.listdir_attr(remote_dir):
+                    remote_path = posixpath.join(remote_dir, remote_entry.filename)
+                    relative_path = posixpath.join(relative_dir, remote_entry.filename) if relative_dir else remote_entry.filename
+                    mode = remote_entry.st_mode or 0
+                    if stat.S_ISDIR(mode):
+                        collect_remote_files(remote_path, relative_path)
+                    else:
+                        remote_files.append((remote_path, relative_path, int(remote_entry.st_size or 0)))
+
+            collect_remote_files(remote_project_dir)
+
+            os.makedirs(local_project_dir, exist_ok=True)
+            total_bytes = sum(item[2] for item in remote_files)
+            downloaded_bytes = 0
+            file_index = 0
+            total_files = len(remote_files)
+
+            progress_dialog = QProgressDialog("Подготовка загрузки...", "Отмена", 0, 100, self)
+            progress_dialog.setWindowTitle("Загрузка проекта с сервера")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
+            progress_dialog.setValue(0)
+
+            def update_progress(file_label: str):
+                percent = int((downloaded_bytes / total_bytes) * 100) if total_bytes > 0 else 0
+                progress_dialog.setValue(min(percent, 100))
+                progress_dialog.setLabelText(
+                    f"Файл {file_index}/{total_files}: {file_label}\n"
+                    f"Прогресс: {downloaded_bytes / (1024 * 1024):.2f} / {total_bytes / (1024 * 1024):.2f} МБ"
+                )
+                QApplication.processEvents()
+
+            try:
+                for remote_path, relative_path, file_size in remote_files:
+                    if progress_dialog.wasCanceled():
+                        raise RuntimeError("Загрузка отменена пользователем.")
+                    file_index += 1
+                    local_path = os.path.join(local_project_dir, *relative_path.split("/"))
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    update_progress(relative_path)
+                    with sftp.file(remote_path, "rb") as remote_stream, open(local_path, "wb") as local_stream:
+                        while True:
+                            if progress_dialog.wasCanceled():
+                                raise RuntimeError("Загрузка отменена пользователем.")
+                            chunk = remote_stream.read(256 * 1024)
+                            if not chunk:
+                                break
+                            local_stream.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            update_progress(relative_path)
+                    if file_size and os.path.getsize(local_path) != file_size:
+                        raise IOError(f"Размер файла не совпал после загрузки: {relative_path}")
+                progress_dialog.setValue(100)
+                progress_dialog.setLabelText("Загрузка завершена")
+                QApplication.processEvents()
+            finally:
+                progress_dialog.close()
+
+        except Exception as exc:
+            QMessageBox.critical(self, "Загрузка проекта с сервера", f"Ошибка при загрузке проекта:\n{exc}")
+            self.statusBar().showMessage("Ошибка загрузки проекта с сервера.", 7000)
+            return
+        finally:
+            if sftp is not None:
+                try:
+                    sftp.close()
+                except Exception:
+                    pass
+            if ssh is not None:
+                try:
+                    ssh.close()
+                except Exception:
+                    pass
+
+        self.statusBar().showMessage("Проект загружен с сервера.", 7000)
+        proj_files = []
+        for root, _, files in os.walk(local_project_dir):
+            for filename in files:
+                if filename.lower().endswith(".proj"):
+                    proj_files.append(os.path.join(root, filename))
+        proj_files.sort()
+
+        if proj_files:
+            proj_to_open = proj_files[0]
+            if len(proj_files) > 1:
+                labels = [os.path.relpath(path, local_project_dir) for path in proj_files]
+                selected, ok = QInputDialog.getItem(
+                    self,
+                    "Открыть проект",
+                    "В скачанной папке найдено несколько .proj файлов:",
+                    labels,
+                    0,
+                    False,
+                )
+                if ok and selected:
+                    proj_to_open = proj_files[labels.index(selected)]
+                else:
+                    proj_to_open = ""
+            if proj_to_open:
+                reply = QMessageBox.question(
+                    self,
+                    "Открыть проект",
+                    f"Проект загружен в папку:\n{local_project_dir}\n\nОткрыть файл {os.path.basename(proj_to_open)}?",
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes,
+                )
+                if reply == QMessageBox.Yes:
+                    if self._confirm_save_before_load():
+                        self._load_project_file(proj_to_open)
+                    return
+
+        QMessageBox.information(self, "Загрузка проекта с сервера", f"Проект загружен в папку:\n{local_project_dir}")
+
     def upload_config_to_server(self):
         if self.current_project_file:
             self._sync_auxiliary_configs_from_current_state(show_errors=False)
@@ -4590,7 +5397,7 @@ class PlanEditorMainWindow(QMainWindow):
 
         target_dir_edit = QLineEdit(dialog)
         target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
-        target_dir_edit.setText("~/headphones")
+        target_dir_edit.setText(DEFAULT_REMOTE_PROJECTS_DIR)
         form_layout.addRow("Каталог на сервере:", target_dir_edit)
 
         port_spin = QSpinBox(dialog)
@@ -4679,20 +5486,22 @@ class PlanEditorMainWindow(QMainWindow):
         tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
         rooms_bytes = rooms_json_text.encode("utf-8")
         tracks_bytes = tracks_json_text.encode("utf-8")
+        system_config_bytes: dict[str, bytes] = {}
+        for filename, path in self._system_config_paths().items():
+            if not os.path.isfile(path):
+                continue
+            try:
+                with open(path, "rb") as config_file:
+                    system_config_bytes[filename] = config_file.read()
+            except OSError:
+                continue
 
         ssh = None
         sftp = None
         normalized_target_directory = ""
         export_folder_name = ""
         upload_results: list[tuple[str, bool, str]] = []
-
-        progress_dialog = QProgressDialog("Подготовка выгрузки...", "Отмена", 0, 100, self)
-        progress_dialog.setWindowTitle("Выгрузка на сервер")
-        progress_dialog.setWindowModality(Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setAutoClose(False)
-        progress_dialog.setAutoReset(False)
-        progress_dialog.setValue(0)
+        progress_dialog = None
 
         bytes_uploaded = 0
         total_bytes_to_upload = 0
@@ -4700,6 +5509,8 @@ class PlanEditorMainWindow(QMainWindow):
         total_files_count = 0
 
         def update_progress(file_label: str):
+            if progress_dialog is None:
+                return
             percent = int((bytes_uploaded / total_bytes_to_upload) * 100) if total_bytes_to_upload > 0 else 0
             progress_dialog.setValue(min(percent, 100))
             progress_dialog.setLabelText(
@@ -4717,7 +5528,7 @@ class PlanEditorMainWindow(QMainWindow):
             update_progress(display_name)
             with sftp.file(remote_path, "wb") as remote_file:
                 while uploaded_for_file < file_size:
-                    if progress_dialog.wasCanceled():
+                    if progress_dialog is not None and progress_dialog.wasCanceled():
                         raise RuntimeError("Выгрузка отменена пользователем.")
                     next_chunk = payload[uploaded_for_file:uploaded_for_file + chunk_size]
                     remote_file.write(next_chunk)
@@ -4736,7 +5547,7 @@ class PlanEditorMainWindow(QMainWindow):
             update_progress(display_name)
             with open(local_path, "rb") as local_stream, sftp.file(remote_path, "wb") as remote_stream:
                 while True:
-                    if progress_dialog.wasCanceled():
+                    if progress_dialog is not None and progress_dialog.wasCanceled():
                         raise RuntimeError("Выгрузка отменена пользователем.")
                     chunk = local_stream.read(chunk_size)
                     if not chunk:
@@ -4765,6 +5576,195 @@ class PlanEditorMainWindow(QMainWindow):
                 except IOError:
                     sftp.mkdir(current)
 
+        def remote_exists(path_value: str) -> bool:
+            try:
+                sftp.stat(path_value)
+                return True
+            except IOError:
+                return False
+
+        def read_remote_bytes(path_value: str) -> bytes | None:
+            try:
+                with sftp.file(path_value, "rb") as remote_file:
+                    return remote_file.read()
+            except IOError:
+                return None
+
+        def extract_track_crc_map(data: dict | None) -> dict[str, str]:
+            result = {}
+            files_section = data.get("files") if isinstance(data, dict) else None
+            if not isinstance(files_section, list):
+                return result
+            for item in files_section:
+                if not isinstance(item, dict):
+                    continue
+                name = item.get("name")
+                crc = str(item.get("crc32", "") or "").strip().lower()
+                if isinstance(name, str) and name and crc:
+                    result[name.replace("\\", "/")] = crc
+            return result
+
+        local_track_crc_map = extract_track_crc_map(tracks_data)
+
+        def remote_track_crc_map(remote_tracks_path: str) -> dict[str, str]:
+            payload = read_remote_bytes(remote_tracks_path)
+            if not payload:
+                return {}
+            try:
+                remote_data = json.loads(payload.decode("utf-8"))
+            except Exception:
+                return {}
+            return extract_track_crc_map(remote_data)
+
+        def local_payload_for_upload_item(item_type: str, source: str) -> bytes | None:
+            if item_type == "bytes":
+                if source == "rooms.json":
+                    return rooms_bytes
+                if source == "tracks.json":
+                    return tracks_bytes
+                return system_config_bytes.get(source)
+            try:
+                with open(source, "rb") as local_file:
+                    return local_file.read()
+            except OSError:
+                return None
+
+        def local_mtime_for_upload_item(item_type: str, source: str) -> float:
+            if item_type == "file":
+                path = source
+            elif source == "rooms.json":
+                path = self._rooms_json_path()
+            elif source == "tracks.json":
+                path = self._tracks_json_path()
+            else:
+                path = self._system_config_path(source)
+            if not path:
+                return 0
+            try:
+                return os.path.getmtime(path)
+            except OSError:
+                return 0
+
+        def is_json_display_name(display_name: str) -> bool:
+            return display_name.lower().endswith(".json")
+
+        def is_audio_display_name(display_name: str) -> bool:
+            return display_name.lower().endswith(".mp3")
+
+        def excursion_folder_name() -> str:
+            excurs_data = self._load_system_config("excurs.json")
+            excursions = excurs_data.get("excursions") if isinstance(excurs_data, dict) else None
+            if isinstance(excursions, list) and excursions and isinstance(excursions[0], dict):
+                path_value = str(excursions[0].get("path", "") or "").strip()
+                if path_value:
+                    return self._sanitize_name_for_folder(path_value) or path_value
+                name_value = str(excursions[0].get("name", "") or "").strip()
+                if name_value:
+                    return self._sanitize_name_for_folder(name_value) or name_value
+            project_label = self._project_label_for_configs()
+            return self._sanitize_name_for_folder(project_label) or project_label
+
+        def decode_json_payload(payload: bytes | None):
+            if not payload:
+                return None
+            try:
+                return json.loads(payload.decode("utf-8"))
+            except Exception:
+                return None
+
+        def format_json_value(value) -> str:
+            if isinstance(value, str):
+                return value
+            if value is None:
+                return "null"
+            try:
+                return json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except TypeError:
+                return str(value)
+
+        def diff_json_values(server_value, local_value, path: str = "") -> list[tuple[str, str, str]]:
+            if isinstance(server_value, dict) and isinstance(local_value, dict):
+                diffs = []
+                keys = sorted(set(server_value) | set(local_value), key=str)
+                for key in keys:
+                    child_path = f"{path}.{key}" if path else str(key)
+                    if key not in server_value:
+                        diffs.append((child_path, "<нет>", format_json_value(local_value.get(key))))
+                    elif key not in local_value:
+                        diffs.append((child_path, format_json_value(server_value.get(key)), "<нет>"))
+                    else:
+                        diffs.extend(diff_json_values(server_value.get(key), local_value.get(key), child_path))
+                return diffs
+            if isinstance(server_value, list) and isinstance(local_value, list):
+                diffs = []
+                max_len = max(len(server_value), len(local_value))
+                for index in range(max_len):
+                    child_path = f"{path}[{index}]" if path else f"[{index}]"
+                    if index >= len(server_value):
+                        diffs.append((child_path, "<нет>", format_json_value(local_value[index])))
+                    elif index >= len(local_value):
+                        diffs.append((child_path, format_json_value(server_value[index]), "<нет>"))
+                    else:
+                        diffs.extend(diff_json_values(server_value[index], local_value[index], child_path))
+                return diffs
+            if server_value != local_value:
+                return [(path or "<root>", format_json_value(server_value), format_json_value(local_value))]
+            return []
+
+        def format_timestamp(timestamp_value: float | int | None) -> str:
+            if not timestamp_value:
+                return "неизвестно"
+            try:
+                return datetime.fromtimestamp(float(timestamp_value)).strftime("%Y-%m-%d %H:%M:%S")
+            except (TypeError, ValueError, OSError):
+                return "неизвестно"
+
+        def show_replacement_summary(rows: list[dict]) -> bool:
+            summary_dialog = QDialog(self)
+            summary_dialog.setWindowTitle("Подтверждение замены файлов")
+            summary_dialog.resize(760, 520)
+            summary_layout = QVBoxLayout(summary_dialog)
+            intro = QLabel("Будут заменены файлы на сервере:", summary_dialog)
+            summary_layout.addWidget(intro)
+
+            list_widget = QTreeWidget(summary_dialog)
+            list_widget.setColumnCount(4)
+            list_widget.setHeaderLabels(["Файл / параметр", "На сервере", "Загружается", "Причина"])
+            list_widget.setRootIsDecorated(True)
+            list_widget.setAlternatingRowColors(True)
+            for row in rows:
+                item = QTreeWidgetItem([
+                    str(row.get("display_name", "")),
+                    format_timestamp(row.get("remote_mtime")),
+                    format_timestamp(row.get("local_mtime")),
+                    str(row.get("reason", "")),
+                ])
+                list_widget.addTopLevelItem(item)
+                for path, server_value, local_value in row.get("json_diffs", []):
+                    child = QTreeWidgetItem([
+                        str(path),
+                        str(server_value),
+                        str(local_value),
+                        "параметр изменён",
+                    ])
+                    item.addChild(child)
+                if row.get("json_diffs"):
+                    item.setExpanded(True)
+            header = list_widget.header()
+            header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(3, QHeaderView.Stretch)
+            summary_layout.addWidget(list_widget, 1)
+
+            buttons = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No, summary_dialog)
+            buttons.button(QDialogButtonBox.Yes).setText("Заменить")
+            buttons.button(QDialogButtonBox.No).setText("Отмена")
+            buttons.accepted.connect(summary_dialog.accept)
+            buttons.rejected.connect(summary_dialog.reject)
+            summary_layout.addWidget(buttons)
+            return summary_dialog.exec() == QDialog.Accepted
+
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -4786,19 +5786,42 @@ class PlanEditorMainWindow(QMainWindow):
             else:
                 base_dir = sftp.normalize(".")
 
-            export_folder_name = self._build_remote_export_folder_name()
+            try:
+                default_projects_dir = sftp.normalize(DEFAULT_REMOTE_PROJECTS_DIR)
+            except IOError:
+                default_projects_dir = DEFAULT_REMOTE_PROJECTS_DIR
+            is_direct_ftpradiog_upload = (
+                base_dir.rstrip("/") == default_projects_dir.rstrip("/")
+            )
+
+            if is_direct_ftpradiog_upload:
+                project_label = self._project_label_for_configs()
+                export_folder_name = self._sanitize_name_for_folder(project_label) or project_label
+            else:
+                export_folder_name = self._build_remote_export_folder_name()
             target_directory = posixpath.join(base_dir, export_folder_name)
             ensure_remote_dirs(target_directory)
             normalized_target_directory = sftp.normalize(target_directory)
 
+            nested_project_dir = posixpath.join(normalized_target_directory, excursion_folder_name())
+            tracks_content_dir = posixpath.join(nested_project_dir, "content")
+            ensure_remote_dirs(tracks_content_dir)
+
             rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
-            tracks_remote_path = posixpath.join(normalized_target_directory, "tracks.json")
+            tracks_remote_path = posixpath.join(tracks_content_dir, "tracks.json")
 
             files_to_upload: list[tuple[str, str, int, str, str]] = [
                 ("bytes", rooms_remote_path, len(rooms_bytes), "rooms.json", "rooms.json"),
+                ("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"),
             ]
-            if not upload_full_project:
-                files_to_upload.append(("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"))
+            for filename, payload in system_config_bytes.items():
+                files_to_upload.append((
+                    "bytes",
+                    posixpath.join(normalized_target_directory, filename),
+                    len(payload),
+                    filename,
+                    filename,
+                ))
 
             project_file_remote = ""
             local_project_file = ""
@@ -4821,7 +5844,7 @@ class PlanEditorMainWindow(QMainWindow):
                     local_project_file,
                 ))
 
-                root_remote_dir = posixpath.join(normalized_target_directory, os.path.basename(local_root_dir))
+                root_remote_dir = nested_project_dir if is_direct_ftpradiog_upload else posixpath.join(normalized_target_directory, os.path.basename(local_root_dir))
                 ensure_remote_dirs(root_remote_dir)
 
                 for root, _, files in os.walk(local_root_dir):
@@ -4831,17 +5854,129 @@ class PlanEditorMainWindow(QMainWindow):
                     for filename in files:
                         local_path = os.path.join(root, filename)
                         remote_path = posixpath.join(remote_root, filename)
-                        rel_display = os.path.relpath(local_path, os.path.dirname(local_project_file)).replace("\\", "/")
+                        if is_direct_ftpradiog_upload:
+                            rel_from_root = os.path.relpath(local_path, local_root_dir).replace("\\", "/")
+                            if rel_from_root.lower() == "content/tracks.json":
+                                continue
+                            rel_display = rel_from_root
+                            if rel_from_root.lower().startswith("content/"):
+                                rel_display = rel_from_root[len("content/"):]
+                            remote_path = posixpath.join(root_remote_dir, rel_from_root)
+                        else:
+                            rel_display = os.path.relpath(local_path, os.path.dirname(local_project_file)).replace("\\", "/")
                         files_to_upload.append(("file", remote_path, os.path.getsize(local_path), rel_display, local_path))
+
+            if is_direct_ftpradiog_upload:
+                remote_crc_map = remote_track_crc_map(tracks_remote_path)
+                filtered_files: list[tuple[str, str, int, str, str]] = []
+                replacement_rows: list[dict] = []
+                compare_dialog = QProgressDialog("Сравнение файлов...", "Отмена", 0, len(files_to_upload), self)
+                compare_dialog.setWindowTitle("Сравнение файлов на сервере")
+                compare_dialog.setWindowModality(Qt.WindowModal)
+                compare_dialog.setMinimumDuration(0)
+                compare_dialog.setAutoClose(False)
+                compare_dialog.setAutoReset(False)
+                compare_dialog.setValue(0)
+                try:
+                    for index, (item_type, remote_path, size_value, display_name, source) in enumerate(files_to_upload, start=1):
+                        if compare_dialog.wasCanceled():
+                            self.statusBar().showMessage("Сравнение отменено.", 5000)
+                            return
+                        compare_dialog.setValue(index - 1)
+                        compare_dialog.setLabelText(f"Сравнение {index}/{len(files_to_upload)}:\n{display_name}")
+                        QApplication.processEvents()
+
+                        try:
+                            remote_stat = sftp.stat(remote_path)
+                        except IOError:
+                            remote_stat = None
+                        if remote_stat is None:
+                            filtered_files.append((item_type, remote_path, size_value, display_name, source))
+                            compare_dialog.setValue(index)
+                            QApplication.processEvents()
+                            continue
+
+                        json_diffs = []
+                        should_upload = True
+                        replacement_reason = ""
+                        if is_audio_display_name(display_name):
+                            normalized_audio_name = display_name.replace("\\", "/")
+                            if normalized_audio_name.startswith("content/"):
+                                normalized_audio_name = normalized_audio_name[len("content/"):]
+                            local_crc = local_track_crc_map.get(normalized_audio_name)
+                            remote_crc = remote_crc_map.get(normalized_audio_name)
+                            if local_crc is None:
+                                local_crc = local_track_crc_map.get(os.path.basename(normalized_audio_name))
+                            if remote_crc is None:
+                                remote_crc = remote_crc_map.get(os.path.basename(normalized_audio_name))
+                            if local_crc and remote_crc:
+                                should_upload = local_crc != remote_crc
+                            else:
+                                should_upload = False
+                            if should_upload:
+                                replacement_reason = "CRC отличается"
+                        elif is_json_display_name(display_name):
+                            local_payload = local_payload_for_upload_item(item_type, source)
+                            remote_payload = read_remote_bytes(remote_path)
+                            local_json = decode_json_payload(local_payload)
+                            remote_json = decode_json_payload(remote_payload)
+                            json_diffs = diff_json_values(remote_json, local_json) if local_json is not None and remote_json is not None else []
+                            should_upload = bool(json_diffs) if local_json is not None and remote_json is not None else local_payload is not None and local_payload != remote_payload
+                            if should_upload:
+                                replacement_reason = "параметры изменились" if json_diffs else "содержимое отличается"
+                        else:
+                            local_payload = local_payload_for_upload_item(item_type, source)
+                            remote_payload = read_remote_bytes(remote_path)
+                            should_upload = local_payload is not None and local_payload != remote_payload
+                            if should_upload:
+                                replacement_reason = "файл отличается"
+
+                        if should_upload:
+                            filtered_files.append((item_type, remote_path, size_value, display_name, source))
+                            replacement_rows.append({
+                                "display_name": display_name,
+                                "remote_mtime": remote_stat.st_mtime or 0,
+                                "local_mtime": local_mtime_for_upload_item(item_type, source),
+                                "reason": replacement_reason,
+                                "json_diffs": json_diffs,
+                            })
+                        compare_dialog.setValue(index)
+                        QApplication.processEvents()
+                finally:
+                    compare_dialog.close()
+
+                if not filtered_files:
+                    QMessageBox.information(self, "Выгрузка на сервер", "На сервере уже актуальная версия проекта. Загружать нечего.")
+                    self.statusBar().showMessage("Выгрузка не требуется: серверная версия актуальна.", 7000)
+                    return
+
+                if replacement_rows:
+                    if not show_replacement_summary(replacement_rows):
+                        self.statusBar().showMessage("Выгрузка отменена.", 5000)
+                        return
+
+                files_to_upload = filtered_files
 
             total_bytes_to_upload = sum(item[2] for item in files_to_upload)
             total_files_count = len(files_to_upload)
+            progress_dialog = QProgressDialog("Подготовка выгрузки...", "Отмена", 0, 100, self)
+            progress_dialog.setWindowTitle("Выгрузка на сервер")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
+            progress_dialog.setValue(0)
             progress_dialog.setMaximum(100)
 
             for item_type, remote_path, _, display_name, source in files_to_upload:
                 self.statusBar().showMessage(f"Загрузка: {display_name}")
                 if item_type == "bytes":
-                    payload = rooms_bytes if source == "rooms.json" else tracks_bytes
+                    if source == "rooms.json":
+                        payload = rooms_bytes
+                    elif source == "tracks.json":
+                        payload = tracks_bytes
+                    else:
+                        payload = system_config_bytes[source]
                     upload_bytes(remote_path, payload, display_name)
                 else:
                     upload_local_file(source, remote_path, display_name)
@@ -4856,7 +5991,8 @@ class PlanEditorMainWindow(QMainWindow):
             self.statusBar().showMessage("Ошибка выгрузки конфигурации.", 7000)
             return
         finally:
-            progress_dialog.close()
+            if progress_dialog is not None:
+                progress_dialog.close()
             if sftp is not None:
                 try:
                     sftp.close()
