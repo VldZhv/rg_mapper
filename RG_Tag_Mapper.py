@@ -2630,6 +2630,154 @@ class PlanEditorMainWindow(QMainWindow):
             },
         }
 
+    def _default_server_connection_settings(self) -> dict:
+        app_root = os.path.dirname(os.path.abspath(__file__))
+        preferred_key_path = os.path.join(app_root, "id_rsa")
+        key_path = preferred_key_path if os.path.isfile(preferred_key_path) else ""
+        if not key_path:
+            key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd()) or ""
+        return {
+            "host": "178.154.195.218",
+            "username": "radiog",
+            "remote_dir": DEFAULT_REMOTE_PROJECTS_DIR,
+            "port": 26015,
+            "key_path": key_path,
+            "passphrase": "",
+        }
+
+    def _load_server_connection_settings(self) -> dict:
+        defaults = self._default_server_connection_settings()
+        settings = app_settings()
+        return {
+            "host": str(settings.value("server/host", defaults["host"]) or "").strip(),
+            "username": str(settings.value("server/username", defaults["username"]) or "").strip(),
+            "remote_dir": str(settings.value("server/remote_dir", defaults["remote_dir"]) or DEFAULT_REMOTE_PROJECTS_DIR).strip(),
+            "port": int(settings.value("server/port", defaults["port"]) or defaults["port"]),
+            "key_path": str(settings.value("server/key_path", defaults["key_path"]) or "").strip(),
+            "passphrase": str(settings.value("server/passphrase", defaults["passphrase"]) or ""),
+        }
+
+    def _save_server_connection_settings(self, values: dict):
+        settings = app_settings()
+        settings.setValue("server/host", values.get("host", ""))
+        settings.setValue("server/username", values.get("username", ""))
+        settings.setValue("server/remote_dir", values.get("remote_dir", DEFAULT_REMOTE_PROJECTS_DIR))
+        settings.setValue("server/port", int(values.get("port", 26015) or 26015))
+        settings.setValue("server/key_path", values.get("key_path", ""))
+        settings.setValue("server/passphrase", values.get("passphrase", ""))
+
+    def show_app_settings_dialog(self):
+        current = self._load_server_connection_settings()
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Настройки приложения")
+        layout = QVBoxLayout(dialog)
+
+        group = QGroupBox("Подключение к серверу", dialog)
+        form_layout = QFormLayout(group)
+
+        host_edit = QLineEdit(group)
+        host_edit.setPlaceholderText("example.com")
+        host_edit.setText(current["host"])
+        form_layout.addRow("Хост:", host_edit)
+
+        login_edit = QLineEdit(group)
+        login_edit.setPlaceholderText("user")
+        login_edit.setText(current["username"])
+        form_layout.addRow("Логин:", login_edit)
+
+        remote_dir_edit = QLineEdit(group)
+        remote_dir_edit.setText(current["remote_dir"])
+        form_layout.addRow("Каталог проектов:", remote_dir_edit)
+
+        port_spin = QSpinBox(group)
+        port_spin.setRange(1, 65535)
+        port_spin.setValue(int(current["port"] or 26015))
+        form_layout.addRow("Порт:", port_spin)
+
+        password_edit = QLineEdit(group)
+        password_edit.setEchoMode(QLineEdit.Password)
+        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
+        password_edit.setText(current["passphrase"])
+        form_layout.addRow("Пароль к ключу:", password_edit)
+
+        key_widget = QWidget(group)
+        key_layout = QHBoxLayout(key_widget)
+        key_layout.setContentsMargins(0, 0, 0, 0)
+        key_path_edit = QLineEdit(key_widget)
+        key_path_edit.setPlaceholderText("Файл приватного SSH-ключа")
+        key_path_edit.setText(current["key_path"])
+        key_layout.addWidget(key_path_edit)
+
+        browse_button = QPushButton("Обзор...", key_widget)
+
+        def browse_key_file():
+            filename, _ = choose_open_file(
+                self,
+                "Выберите приватный ключ SSH",
+                os.path.expanduser("~/.ssh"),
+                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh *.ppk)",
+            )
+            if filename:
+                key_path_edit.setText(filename)
+
+        browse_button.clicked.connect(browse_key_file)
+        key_layout.addWidget(browse_button)
+        form_layout.addRow("Файл ключа:", key_widget)
+
+        layout.addWidget(group)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        values = {
+            "host": host_edit.text().strip(),
+            "username": login_edit.text().strip(),
+            "remote_dir": remote_dir_edit.text().replace("\\", "/").strip() or DEFAULT_REMOTE_PROJECTS_DIR,
+            "port": port_spin.value(),
+            "key_path": key_path_edit.text().strip(),
+            "passphrase": password_edit.text(),
+        }
+        self._save_server_connection_settings(values)
+        self.statusBar().showMessage("Настройки приложения сохранены.", 5000)
+
+    def _server_connection_settings_or_warn(self, title: str) -> dict | None:
+        values = self._load_server_connection_settings()
+        if not values["host"] or not values["username"] or not values["key_path"]:
+            QMessageBox.warning(
+                self,
+                title,
+                "Заполните хост, логин и путь к ключу в меню Настройки приложения.",
+            )
+            self.show_app_settings_dialog()
+            return None
+        try:
+            with open(values["key_path"], "rb") as key_file:
+                key_file.read(1)
+        except Exception as exc:
+            QMessageBox.critical(self, title, f"Не удалось открыть файл ключа:\n{exc}")
+            return None
+        return values
+
+    def _load_server_private_key(self, key_path: str, passphrase: str | None, title: str):
+        try:
+            if key_path.lower().endswith(".ppk"):
+                import importlib.util
+                if importlib.util.find_spec("paramiko.ppk") is not None:
+                    from paramiko.ppk import PPKKey as _PPKKey
+                    return _PPKKey.from_file(key_path, password=passphrase)
+                if importlib.util.find_spec("paramiko_ppk") is not None:
+                    from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
+                    return _PPKKey.from_file(key_path, password=passphrase)
+                raise ModuleNotFoundError("Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk.")
+            return paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
+        except Exception as exc:
+            QMessageBox.critical(self, title, f"Не удалось загрузить SSH-ключ:\n{exc}")
+            return None
+
     def _load_system_config(self, filename: str):
         path = self._system_config_path(filename)
         if not path or not os.path.isfile(path):
@@ -2962,14 +3110,22 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_save_as.triggered.connect(self.save_project_as)
 
         self.action_project_properties = QAction(
+            load_icon("properties.png", QStyle.SP_FileDialogDetailedView),
             "Свойства проекта",
             self,
         )
         self.action_project_properties.triggered.connect(self.show_project_properties_dialog)
 
+        self.action_app_settings = QAction(
+            load_icon("app_settings.png", QStyle.SP_ComputerIcon),
+            "Настройки приложения",
+            self,
+        )
+        self.action_app_settings.triggered.connect(self.show_app_settings_dialog)
+
         self.action_load = QAction(
             load_icon("load.png", QStyle.SP_DialogOpenButton),
-            "Загрузить проект",
+            "Открыть проект",
             self,
         )
         self.action_load.triggered.connect(self.load_project)
@@ -3003,7 +3159,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.action_upload.triggered.connect(self.upload_config_to_server)
 
         self.action_download_project = QAction(
-            load_icon("load.png", QStyle.SP_ArrowDown),
+            load_icon("server_download.png", QStyle.SP_ArrowDown),
             "Загрузить проект с сервера",
             self,
         )
@@ -3092,6 +3248,7 @@ class PlanEditorMainWindow(QMainWindow):
         file_menu.addAction(self.action_save)
         file_menu.addAction(self.action_save_as)
         file_menu.addAction(self.action_project_properties)
+        file_menu.addAction(self.action_app_settings)
         file_menu.addAction(self.action_load)
         file_menu.addSeparator()
         file_menu.addAction(self.action_import)
@@ -3156,6 +3313,7 @@ class PlanEditorMainWindow(QMainWindow):
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_save)
         file_toolbar.addAction(self.action_load)
+        file_toolbar.addAction(self.action_project_properties)
         self._add_toolbar_group_separator(file_toolbar)
         file_toolbar.addAction(self.action_import)
         file_toolbar.addAction(self.action_export)
@@ -4950,7 +5108,7 @@ class PlanEditorMainWindow(QMainWindow):
     def load_project(self):
         if not self._confirm_save_before_load():
             return
-        fp,_ = choose_open_file(self,"Загрузить проект", get_last_used_directory(),"*.proj")
+        fp,_ = choose_open_file(self,"Открыть проект", get_last_used_directory(),"*.proj")
         if not fp: return
         self._load_project_file(fp)
 
@@ -5079,106 +5237,33 @@ class PlanEditorMainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось экспортировать:\n{e}")
 
     def download_project_from_server(self):
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Загрузка проекта с сервера")
-        form_layout = QFormLayout(dialog)
-
-        host_edit = QLineEdit(dialog)
-        host_edit.setPlaceholderText("example.com")
-        host_edit.setText("178.154.195.218")
-        form_layout.addRow("Хост:", host_edit)
-
-        login_edit = QLineEdit(dialog)
-        login_edit.setPlaceholderText("user")
-        login_edit.setText("radiog")
-        form_layout.addRow("Логин:", login_edit)
-
-        remote_dir_edit = QLineEdit(dialog)
-        remote_dir_edit.setText(DEFAULT_REMOTE_PROJECTS_DIR)
-        form_layout.addRow("Каталог проектов:", remote_dir_edit)
-
-        port_spin = QSpinBox(dialog)
-        port_spin.setRange(1, 65535)
-        port_spin.setValue(26015)
-        form_layout.addRow("Порт:", port_spin)
-
-        password_edit = QLineEdit(dialog)
-        password_edit.setEchoMode(QLineEdit.Password)
-        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
-        form_layout.addRow("Пароль к ключу:", password_edit)
-
-        key_widget = QWidget(dialog)
-        key_layout = QHBoxLayout(key_widget)
-        key_layout.setContentsMargins(0, 0, 0, 0)
-        key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
-        app_root = os.path.dirname(os.path.abspath(__file__))
-        preferred_key_path = os.path.join(app_root, "id_rsa")
-        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
-        if not default_key_path:
-            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
-        if default_key_path:
-            key_path_edit.setText(default_key_path)
-        key_layout.addWidget(key_path_edit)
-
-        browse_button = QPushButton("Обзор…", key_widget)
-
-        def browse_key_file():
-            filename, _ = choose_open_file(
+        update_current_project = False
+        if self.current_project_file:
+            download_action, action_ok = QInputDialog.getItem(
                 self,
-                "Выберите приватный ключ SSH",
-                os.path.expanduser("~/.ssh"),
-                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh)",
+                "Загрузка проекта с сервера",
+                "Выберите действие:",
+                ["Обновить текущий проект", "Загрузить новый проект"],
+                0,
+                False,
             )
-            if filename:
-                key_path_edit.setText(filename)
+            if not action_ok:
+                return
+            update_current_project = download_action == "Обновить текущий проект"
+            if update_current_project and not self._confirm_save_before_load():
+                return
 
-        browse_button.clicked.connect(browse_key_file)
-        key_layout.addWidget(browse_button)
-        form_layout.addRow("Файл ключа:", key_widget)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form_layout.addRow(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
+        connection_settings = self._server_connection_settings_or_warn("Загрузка проекта с сервера")
+        if connection_settings is None:
             return
-
-        host = host_edit.text().strip()
-        username = login_edit.text().strip()
-        remote_root = remote_dir_edit.text().replace("\\", "/").strip() or DEFAULT_REMOTE_PROJECTS_DIR
-        key_path = key_path_edit.text().strip()
-        port = port_spin.value()
-        passphrase = password_edit.text() or None
-
-        if not host or not username or not key_path:
-            QMessageBox.warning(self, "Загрузка проекта с сервера", "Заполните хост, логин и путь к ключу для подключения.")
-            return
-
-        try:
-            with open(key_path, "rb") as _key_file:
-                _key_file.read(1)
-        except Exception as exc:
-            QMessageBox.critical(self, "Загрузка проекта с сервера", f"Не удалось открыть файл ключа:\n{exc}")
-            return
-
-        try:
-            key_obj = None
-            if key_path.lower().endswith(".ppk"):
-                import importlib.util
-                if importlib.util.find_spec("paramiko.ppk") is not None:
-                    from paramiko.ppk import PPKKey as _PPKKey
-                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
-                elif importlib.util.find_spec("paramiko_ppk") is not None:
-                    from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
-                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
-                else:
-                    raise ModuleNotFoundError("Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk.")
-            else:
-                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
-        except Exception as exc:
-            QMessageBox.critical(self, "Загрузка проекта с сервера", f"Не удалось загрузить SSH-ключ:\n{exc}")
+        host = connection_settings["host"]
+        username = connection_settings["username"]
+        remote_root = connection_settings["remote_dir"].replace("\\", "/").strip() or DEFAULT_REMOTE_PROJECTS_DIR
+        key_path = connection_settings["key_path"]
+        port = int(connection_settings["port"])
+        passphrase = connection_settings["passphrase"] or None
+        key_obj = self._load_server_private_key(key_path, passphrase, "Загрузка проекта с сервера")
+        if key_obj is None:
             return
 
         ssh = None
@@ -5204,46 +5289,235 @@ class PlanEditorMainWindow(QMainWindow):
                 QMessageBox.information(self, "Загрузка проекта с сервера", "Доступные проекты не найдены.")
                 return
 
-            projects_dialog = QDialog(self)
-            projects_dialog.setWindowTitle("Загрузка проекта с сервера")
-            projects_layout = QVBoxLayout(projects_dialog)
-            projects_layout.addWidget(QLabel("Выберите проект:", projects_dialog))
-            projects_list = QListWidget(projects_dialog)
-            projects_list.addItems(project_names)
-            projects_list.setMinimumWidth(360)
-            projects_list.setMinimumHeight(max(180, len(project_names) * 24 + 12))
-            if project_names:
-                projects_list.setCurrentRow(0)
-            projects_layout.addWidget(projects_list)
-            project_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, projects_dialog)
-            project_buttons.accepted.connect(projects_dialog.accept)
-            project_buttons.rejected.connect(projects_dialog.reject)
-            projects_layout.addWidget(project_buttons)
-            projects_list.itemDoubleClicked.connect(lambda _item: projects_dialog.accept())
+            def select_project_from_list(title: str = "Загрузка проекта с сервера") -> str:
+                projects_dialog = QDialog(self)
+                projects_dialog.setWindowTitle(title)
+                projects_layout = QVBoxLayout(projects_dialog)
+                projects_layout.addWidget(QLabel("Выберите проект:", projects_dialog))
+                projects_list = QListWidget(projects_dialog)
+                projects_list.addItems(project_names)
+                projects_list.setMinimumWidth(360)
+                projects_list.setMinimumHeight(max(180, len(project_names) * 24 + 12))
+                if project_names:
+                    projects_list.setCurrentRow(0)
+                projects_layout.addWidget(projects_list)
+                project_buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, projects_dialog)
+                project_buttons.accepted.connect(projects_dialog.accept)
+                project_buttons.rejected.connect(projects_dialog.reject)
+                projects_layout.addWidget(project_buttons)
+                projects_list.itemDoubleClicked.connect(lambda _item: projects_dialog.accept())
+                if projects_dialog.exec() != QDialog.Accepted or not projects_list.currentItem():
+                    return ""
+                return projects_list.currentItem().text()
 
-            if projects_dialog.exec() != QDialog.Accepted or not projects_list.currentItem():
-                return
-            project_name = projects_list.currentItem().text()
-
-            destination_root = choose_directory(self, "Выберите папку для сохранения проекта", get_last_used_directory())
-            if not destination_root:
-                return
-
-            local_project_dir = os.path.join(destination_root, self._sanitize_name_for_folder(project_name) or project_name)
-            if os.path.exists(local_project_dir):
-                reply = QMessageBox.question(
-                    self,
-                    "Загрузка проекта с сервера",
-                    f"Папка уже существует:\n{local_project_dir}\n\nСуществующие файлы могут быть перезаписаны. Продолжить?",
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
+            if update_current_project:
+                project_candidates = []
+                for raw_name in (
+                    self._project_label_for_configs(),
+                    os.path.splitext(os.path.basename(self.current_project_file or ""))[0],
+                ):
+                    candidate = self._sanitize_name_for_folder(raw_name) or raw_name
+                    if candidate and candidate not in project_candidates:
+                        project_candidates.append(candidate)
+                project_name = ""
+                for candidate in project_candidates:
+                    project_name = next((name for name in project_names if name.lower() == candidate.lower()), "")
+                    if project_name:
+                        break
+                if not project_name:
+                    QMessageBox.warning(
+                        self,
+                        "Обновление проекта с сервера",
+                        "На сервере не найдена папка текущего проекта:\n" + "\n".join(project_candidates),
+                    )
                     return
+                local_project_dir = os.path.dirname(os.path.abspath(self.current_project_file))
+            else:
+                project_name = select_project_from_list()
+                if not project_name:
+                    return
+
+                destination_root = choose_directory(self, "Выберите папку для сохранения проекта", get_last_used_directory())
+                if not destination_root:
+                    return
+
+                local_project_dir = os.path.join(destination_root, self._sanitize_name_for_folder(project_name) or project_name)
+                if os.path.exists(local_project_dir):
+                    reply = QMessageBox.question(
+                        self,
+                        "Загрузка проекта с сервера",
+                        f"Папка уже существует:\n{local_project_dir}\n\nСуществующие файлы могут быть перезаписаны. Продолжить?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if reply != QMessageBox.Yes:
+                        return
 
             remote_project_dir = posixpath.join(remote_root_normalized, project_name)
 
             remote_files: list[tuple[str, str, int]] = []
+
+            def read_remote_bytes(path_value: str) -> bytes | None:
+                try:
+                    with sftp.file(path_value, "rb") as remote_file:
+                        return remote_file.read()
+                except IOError:
+                    return None
+
+            def decode_json_payload(payload: bytes | None):
+                if not payload:
+                    return None
+                try:
+                    return json.loads(payload.decode("utf-8"))
+                except Exception:
+                    return None
+
+            def format_json_value(value) -> str:
+                if isinstance(value, str):
+                    return value
+                if value is None:
+                    return "null"
+                try:
+                    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+                except TypeError:
+                    return str(value)
+
+            def diff_json_values(server_value, local_value, path: str = "") -> list[tuple[str, str, str]]:
+                if isinstance(server_value, dict) and isinstance(local_value, dict):
+                    diffs = []
+                    keys = sorted(set(server_value) | set(local_value), key=str)
+                    for key in keys:
+                        child_path = f"{path}.{key}" if path else str(key)
+                        if key not in server_value:
+                            diffs.append((child_path, "<нет>", format_json_value(local_value.get(key))))
+                        elif key not in local_value:
+                            diffs.append((child_path, format_json_value(server_value.get(key)), "<нет>"))
+                        else:
+                            diffs.extend(diff_json_values(server_value.get(key), local_value.get(key), child_path))
+                    return diffs
+                if isinstance(server_value, list) and isinstance(local_value, list):
+                    diffs = []
+                    max_len = max(len(server_value), len(local_value))
+                    for index in range(max_len):
+                        child_path = f"{path}[{index}]" if path else f"[{index}]"
+                        if index >= len(server_value):
+                            diffs.append((child_path, "<нет>", format_json_value(local_value[index])))
+                        elif index >= len(local_value):
+                            diffs.append((child_path, format_json_value(server_value[index]), "<нет>"))
+                        else:
+                            diffs.extend(diff_json_values(server_value[index], local_value[index], child_path))
+                    return diffs
+                if server_value != local_value:
+                    return [(path or "<root>", format_json_value(server_value), format_json_value(local_value))]
+                return []
+
+            def format_timestamp(timestamp_value: float | int | None) -> str:
+                if not timestamp_value:
+                    return "неизвестно"
+                try:
+                    return datetime.fromtimestamp(float(timestamp_value)).strftime("%Y-%m-%d %H:%M:%S")
+                except (TypeError, ValueError, OSError):
+                    return "неизвестно"
+
+            def extract_track_crc_map(data: dict | None) -> dict[str, str]:
+                result = {}
+                files_section = data.get("files") if isinstance(data, dict) else None
+                if not isinstance(files_section, list):
+                    return result
+                for item in files_section:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    crc = str(item.get("crc32", "") or "").strip().lower()
+                    if isinstance(name, str) and name and crc:
+                        result[name.replace("\\", "/")] = crc
+                return result
+
+            def read_local_bytes(path_value: str) -> bytes | None:
+                try:
+                    with open(path_value, "rb") as local_file:
+                        return local_file.read()
+                except OSError:
+                    return None
+
+            def local_mtime(path_value: str) -> float:
+                try:
+                    return os.path.getmtime(path_value)
+                except OSError:
+                    return 0
+
+            def is_json_display_name(display_name: str) -> bool:
+                return display_name.lower().endswith(".json")
+
+            def is_audio_display_name(display_name: str) -> bool:
+                return display_name.lower().endswith(".mp3")
+
+            def normalized_audio_key(display_name: str) -> str:
+                normalized = display_name.replace("\\", "/")
+                if normalized.startswith("content/"):
+                    normalized = normalized[len("content/"):]
+                return normalized
+
+            def show_download_replacement_summary(rows: list[dict]) -> bool:
+                summary_dialog = QDialog(self)
+                summary_dialog.setWindowTitle("Подтверждение замены файлов")
+                summary_dialog.resize(820, 540)
+                summary_layout = QVBoxLayout(summary_dialog)
+                summary_layout.addWidget(QLabel("Будут заменены локальные файлы:", summary_dialog))
+                if any(row.get("local_newer") for row in rows):
+                    warning = QLabel("Внимание: среди заменяемых файлов есть локальные файлы новее серверных.", summary_dialog)
+                    warning.setStyleSheet("color: #b00020; font-weight: 600;")
+                    warning.setWordWrap(True)
+                    summary_layout.addWidget(warning)
+
+                list_widget = QTreeWidget(summary_dialog)
+                list_widget.setColumnCount(4)
+                list_widget.setHeaderLabels(["Файл / параметр", "Локально", "На сервере", "Причина"])
+                list_widget.setRootIsDecorated(True)
+                list_widget.setAlternatingRowColors(True)
+                for row in rows:
+                    reason = str(row.get("reason", ""))
+                    if row.get("local_newer"):
+                        reason = f"{reason}; локальный файл новее"
+                    item = QTreeWidgetItem([
+                        str(row.get("display_name", "")),
+                        format_timestamp(row.get("local_mtime")),
+                        format_timestamp(row.get("remote_mtime")),
+                        reason,
+                    ])
+                    list_widget.addTopLevelItem(item)
+                    for path, server_value, local_value in row.get("json_diffs", []):
+                        child = QTreeWidgetItem([str(path), str(local_value), str(server_value), "параметр изменён"])
+                        item.addChild(child)
+                    if row.get("json_diffs"):
+                        item.setExpanded(True)
+                header = list_widget.header()
+                header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(1, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+                header.setSectionResizeMode(3, QHeaderView.Stretch)
+                summary_layout.addWidget(list_widget, 1)
+
+                buttons = QDialogButtonBox(QDialogButtonBox.Yes | QDialogButtonBox.No, summary_dialog)
+                buttons.button(QDialogButtonBox.Yes).setText("Заменить")
+                buttons.button(QDialogButtonBox.No).setText("Отмена")
+                buttons.accepted.connect(summary_dialog.accept)
+                buttons.rejected.connect(summary_dialog.reject)
+                summary_layout.addWidget(buttons)
+                return summary_dialog.exec() == QDialog.Accepted
+
+            def remote_excursion_folder_name() -> str:
+                excurs_payload = read_remote_bytes(posixpath.join(remote_project_dir, "excurs.json"))
+                excurs_data = decode_json_payload(excurs_payload)
+                excursions = excurs_data.get("excursions") if isinstance(excurs_data, dict) else None
+                if isinstance(excursions, list) and excursions and isinstance(excursions[0], dict):
+                    path_value = str(excursions[0].get("path", "") or "").strip()
+                    if path_value:
+                        return self._sanitize_name_for_folder(path_value) or path_value
+                    name_value = str(excursions[0].get("name", "") or "").strip()
+                    if name_value:
+                        return self._sanitize_name_for_folder(name_value) or name_value
+                return self._sanitize_name_for_folder(project_name) or project_name
 
             def collect_remote_files(remote_dir: str, relative_dir: str = ""):
                 for remote_entry in sftp.listdir_attr(remote_dir):
@@ -5255,13 +5529,154 @@ class PlanEditorMainWindow(QMainWindow):
                     else:
                         remote_files.append((remote_path, relative_path, int(remote_entry.st_size or 0)))
 
-            collect_remote_files(remote_project_dir)
+            download_items: list[tuple[str, str, str, int, float]] = []
+            if update_current_project:
+                if not self._ensure_project_layout_for_current_file():
+                    return
+                local_project_file = os.path.abspath(self.current_project_file)
+                local_project_base_dir = os.path.dirname(local_project_file)
+                local_project_root = self._get_effective_project_root_dir()
+                if not local_project_root:
+                    raise IOError("Не удалось определить локальную папку проекта.")
+
+                nested_remote_dir = posixpath.join(remote_project_dir, remote_excursion_folder_name())
+                try:
+                    sftp.listdir(nested_remote_dir)
+                except IOError:
+                    nested_remote_dir = ""
+                    for entry in sftp.listdir_attr(remote_project_dir):
+                        if stat.S_ISDIR(entry.st_mode or 0):
+                            candidate = posixpath.join(remote_project_dir, entry.filename)
+                            try:
+                                sftp.stat(posixpath.join(candidate, "content", "tracks.json"))
+                                nested_remote_dir = candidate
+                                break
+                            except IOError:
+                                continue
+                if not nested_remote_dir:
+                    raise IOError("На сервере не найдена вложенная папка проекта с content/tracks.json.")
+
+                def collect_update_file(remote_path: str, local_path: str, display_name: str, attr):
+                    download_items.append((
+                        remote_path,
+                        local_path,
+                        display_name.replace("\\", "/"),
+                        int(attr.st_size or 0),
+                        float(attr.st_mtime or 0),
+                    ))
+
+                for entry in sftp.listdir_attr(remote_project_dir):
+                    remote_path = posixpath.join(remote_project_dir, entry.filename)
+                    if stat.S_ISDIR(entry.st_mode or 0):
+                        continue
+                    local_path = local_project_file if entry.filename.lower().endswith(".proj") else os.path.join(local_project_base_dir, entry.filename)
+                    collect_update_file(remote_path, local_path, entry.filename, entry)
+
+                def collect_nested_update_files(remote_dir: str, local_base: str, relative_dir: str = ""):
+                    for entry in sftp.listdir_attr(remote_dir):
+                        remote_path = posixpath.join(remote_dir, entry.filename)
+                        relative_path = posixpath.join(relative_dir, entry.filename) if relative_dir else entry.filename
+                        if stat.S_ISDIR(entry.st_mode or 0):
+                            collect_nested_update_files(remote_path, local_base, relative_path)
+                        else:
+                            local_path = os.path.join(local_base, *relative_path.split("/"))
+                            collect_update_file(remote_path, local_path, relative_path, entry)
+
+                collect_nested_update_files(nested_remote_dir, local_project_root)
+
+                local_tracks_data = decode_json_payload(read_local_bytes(self._tracks_json_path() or ""))
+                remote_tracks_path = posixpath.join(nested_remote_dir, "content", "tracks.json")
+                remote_tracks_data = decode_json_payload(read_remote_bytes(remote_tracks_path))
+                local_crc_map = extract_track_crc_map(local_tracks_data)
+                remote_crc_map = extract_track_crc_map(remote_tracks_data)
+                filtered_items: list[tuple[str, str, str, int, float]] = []
+                replacement_rows: list[dict] = []
+                compare_dialog = QProgressDialog("Сравнение файлов...", "Отмена", 0, len(download_items), self)
+                compare_dialog.setWindowTitle("Сравнение файлов на сервере")
+                compare_dialog.setWindowModality(Qt.WindowModal)
+                compare_dialog.setMinimumDuration(0)
+                compare_dialog.setAutoClose(False)
+                compare_dialog.setAutoReset(False)
+                compare_dialog.setValue(0)
+                try:
+                    for index, (remote_path, local_path, display_name, file_size, remote_mtime) in enumerate(download_items, start=1):
+                        if compare_dialog.wasCanceled():
+                            self.statusBar().showMessage("Сравнение отменено.", 5000)
+                            return
+                        compare_dialog.setValue(index - 1)
+                        compare_dialog.setLabelText(f"Сравнение {index}/{len(download_items)}:\n{display_name}")
+                        QApplication.processEvents()
+
+                        if not os.path.exists(local_path):
+                            filtered_items.append((remote_path, local_path, display_name, file_size, remote_mtime))
+                            compare_dialog.setValue(index)
+                            QApplication.processEvents()
+                            continue
+
+                        json_diffs = []
+                        local_time = local_mtime(local_path)
+                        should_download = True
+                        reason = ""
+                        if is_audio_display_name(display_name):
+                            audio_key = normalized_audio_key(display_name)
+                            local_crc = local_crc_map.get(audio_key) or local_crc_map.get(os.path.basename(audio_key))
+                            remote_crc = remote_crc_map.get(audio_key) or remote_crc_map.get(os.path.basename(audio_key))
+                            if local_crc and remote_crc:
+                                should_download = local_crc != remote_crc
+                            else:
+                                should_download = os.path.getsize(local_path) != file_size
+                            if should_download:
+                                reason = "CRC отличается" if local_crc and remote_crc else "размер файла отличается"
+                        elif is_json_display_name(display_name):
+                            remote_payload = read_remote_bytes(remote_path)
+                            local_payload = read_local_bytes(local_path)
+                            remote_json = decode_json_payload(remote_payload)
+                            local_json = decode_json_payload(local_payload)
+                            json_diffs = diff_json_values(remote_json, local_json) if remote_json is not None and local_json is not None else []
+                            should_download = bool(json_diffs) if remote_json is not None and local_json is not None else remote_payload is not None and remote_payload != local_payload
+                            if should_download:
+                                reason = "параметры изменились" if json_diffs else "содержимое отличается"
+                        else:
+                            remote_payload = read_remote_bytes(remote_path)
+                            local_payload = read_local_bytes(local_path)
+                            should_download = remote_payload is not None and remote_payload != local_payload
+                            if should_download:
+                                reason = "файл отличается"
+
+                        if should_download:
+                            filtered_items.append((remote_path, local_path, display_name, file_size, remote_mtime))
+                            replacement_rows.append({
+                                "display_name": display_name,
+                                "local_mtime": local_time,
+                                "remote_mtime": remote_mtime,
+                                "local_newer": bool(local_time and remote_mtime and local_time > remote_mtime),
+                                "reason": reason,
+                                "json_diffs": json_diffs,
+                            })
+                        compare_dialog.setValue(index)
+                        QApplication.processEvents()
+                finally:
+                    compare_dialog.close()
+
+                if not filtered_items:
+                    QMessageBox.information(self, "Обновление проекта с сервера", "Локальный проект уже актуален. Загружать нечего.")
+                    self.statusBar().showMessage("Обновление не требуется: локальная версия актуальна.", 7000)
+                    return
+                if replacement_rows and not show_download_replacement_summary(replacement_rows):
+                    self.statusBar().showMessage("Обновление проекта отменено.", 5000)
+                    return
+                download_items = filtered_items
+            else:
+                collect_remote_files(remote_project_dir)
+                for remote_path, relative_path, file_size in remote_files:
+                    local_path = os.path.join(local_project_dir, *relative_path.split("/"))
+                    download_items.append((remote_path, local_path, relative_path, file_size, 0))
 
             os.makedirs(local_project_dir, exist_ok=True)
-            total_bytes = sum(item[2] for item in remote_files)
+            total_bytes = sum(item[3] for item in download_items)
             downloaded_bytes = 0
             file_index = 0
-            total_files = len(remote_files)
+            total_files = len(download_items)
 
             progress_dialog = QProgressDialog("Подготовка загрузки...", "Отмена", 0, 100, self)
             progress_dialog.setWindowTitle("Загрузка проекта с сервера")
@@ -5281,13 +5696,12 @@ class PlanEditorMainWindow(QMainWindow):
                 QApplication.processEvents()
 
             try:
-                for remote_path, relative_path, file_size in remote_files:
+                for remote_path, local_path, display_name, file_size, remote_mtime in download_items:
                     if progress_dialog.wasCanceled():
                         raise RuntimeError("Загрузка отменена пользователем.")
                     file_index += 1
-                    local_path = os.path.join(local_project_dir, *relative_path.split("/"))
                     os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                    update_progress(relative_path)
+                    update_progress(display_name)
                     with sftp.file(remote_path, "rb") as remote_stream, open(local_path, "wb") as local_stream:
                         while True:
                             if progress_dialog.wasCanceled():
@@ -5297,9 +5711,14 @@ class PlanEditorMainWindow(QMainWindow):
                                 break
                             local_stream.write(chunk)
                             downloaded_bytes += len(chunk)
-                            update_progress(relative_path)
+                            update_progress(display_name)
                     if file_size and os.path.getsize(local_path) != file_size:
-                        raise IOError(f"Размер файла не совпал после загрузки: {relative_path}")
+                        raise IOError(f"Размер файла не совпал после загрузки: {display_name}")
+                    if remote_mtime:
+                        try:
+                            os.utime(local_path, (remote_mtime, remote_mtime))
+                        except OSError:
+                            pass
                 progress_dialog.setValue(100)
                 progress_dialog.setLabelText("Загрузка завершена")
                 QApplication.processEvents()
@@ -5321,6 +5740,14 @@ class PlanEditorMainWindow(QMainWindow):
                     ssh.close()
                 except Exception:
                     pass
+
+        if update_current_project:
+            current_file = self.current_project_file
+            if current_file and os.path.isfile(current_file):
+                self._load_project_file(current_file)
+            self.statusBar().showMessage("Текущий проект обновлён с сервера.", 7000)
+            QMessageBox.information(self, "Обновление проекта с сервера", "Текущий проект обновлён с сервера.")
+            return
 
         self.statusBar().showMessage("Проект загружен с сервера.", 7000)
         proj_files = []
@@ -5381,106 +5808,17 @@ class PlanEditorMainWindow(QMainWindow):
             return
         upload_full_project = upload_mode == "Проект целиком"
 
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Выгрузка на сервер")
-        form_layout = QFormLayout(dialog)
-
-        host_edit = QLineEdit(dialog)
-        host_edit.setPlaceholderText("example.com")
-        host_edit.setText("178.154.195.218")
-        form_layout.addRow("Хост:", host_edit)
-
-        login_edit = QLineEdit(dialog)
-        login_edit.setPlaceholderText("user")
-        login_edit.setText("radiog")
-        form_layout.addRow("Логин:", login_edit)
-
-        target_dir_edit = QLineEdit(dialog)
-        target_dir_edit.setPlaceholderText("~/rg_mapper (символ ~ разворачивается в домашний каталог)")
-        target_dir_edit.setText(DEFAULT_REMOTE_PROJECTS_DIR)
-        form_layout.addRow("Каталог на сервере:", target_dir_edit)
-
-        port_spin = QSpinBox(dialog)
-        port_spin.setRange(1, 65535)
-        port_spin.setValue(26015)
-        form_layout.addRow("Порт:", port_spin)
-
-        password_edit = QLineEdit(dialog)
-        password_edit.setEchoMode(QLineEdit.Password)
-        password_edit.setPlaceholderText("Пароль для ключа (если требуется)")
-        form_layout.addRow("Пароль к ключу:", password_edit)
-
-        key_widget = QWidget(dialog)
-        key_layout = QHBoxLayout(key_widget)
-        key_layout.setContentsMargins(0, 0, 0, 0)
-        key_path_edit = QLineEdit(key_widget)
-        key_path_edit.setPlaceholderText("Файл ключа из текущей папки")
-        app_root = os.path.dirname(os.path.abspath(__file__))
-        preferred_key_path = os.path.join(app_root, "id_rsa")
-        default_key_path = preferred_key_path if os.path.isfile(preferred_key_path) else None
-        if not default_key_path:
-            default_key_path = find_default_ssh_key(app_root) or find_default_ssh_key(os.getcwd())
-        if default_key_path:
-            key_path_edit.setText(default_key_path)
-        key_layout.addWidget(key_path_edit)
-        browse_button = QPushButton("Обзор…", key_widget)
-
-        def browse_key_file():
-            filename, _ = choose_open_file(
-                self,
-                "Выберите приватный ключ SSH",
-                os.path.expanduser("~/.ssh"),
-                "Все файлы (*);;OpenSSH ключи (*.pem *.key *.rsa *.ssh)",
-            )
-            if filename:
-                key_path_edit.setText(filename)
-
-        browse_button.clicked.connect(browse_key_file)
-        key_layout.addWidget(browse_button)
-        form_layout.addRow("Файл ключа:", key_widget)
-
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, dialog)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        form_layout.addRow(buttons)
-
-        if dialog.exec() != QDialog.Accepted:
+        connection_settings = self._server_connection_settings_or_warn("Выгрузка на сервер")
+        if connection_settings is None:
             return
-
-        host = host_edit.text().strip()
-        username = login_edit.text().strip()
-        remote_dir = target_dir_edit.text().strip()
-        key_path = key_path_edit.text().strip()
-        port = port_spin.value()
-        passphrase = password_edit.text() or None
-
-        if not host or not username or not key_path:
-            QMessageBox.warning(self, "Выгрузка на сервер", "Заполните хост, логин и путь к ключу для подключения.")
-            return
-
-        try:
-            with open(key_path, "rb") as _key_file:
-                _key_file.read(1)
-        except Exception as exc:
-            QMessageBox.critical(self, "Выгрузка на сервер", f"Не удалось открыть файл ключа:\n{exc}")
-            return
-
-        try:
-            key_obj = None
-            if key_path.lower().endswith(".ppk"):
-                import importlib.util
-                if importlib.util.find_spec("paramiko.ppk") is not None:
-                    from paramiko.ppk import PPKKey as _PPKKey
-                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
-                elif importlib.util.find_spec("paramiko_ppk") is not None:
-                    from paramiko_ppk import PPKKey as _PPKKey  # type: ignore
-                    key_obj = _PPKKey.from_file(key_path, password=passphrase)
-                else:
-                    raise ModuleNotFoundError("Поддержка ключей PPK недоступна. Установите пакет paramiko-ppk.")
-            else:
-                key_obj = paramiko.RSAKey.from_private_key_file(key_path, password=passphrase)
-        except Exception as exc:
-            QMessageBox.critical(self, "Выгрузка на сервер", f"Не удалось загрузить SSH-ключ:\n{exc}")
+        host = connection_settings["host"]
+        username = connection_settings["username"]
+        remote_dir = connection_settings["remote_dir"]
+        key_path = connection_settings["key_path"]
+        port = int(connection_settings["port"])
+        passphrase = connection_settings["passphrase"] or None
+        key_obj = self._load_server_private_key(key_path, passphrase, "Выгрузка на сервер")
+        if key_obj is None:
             return
 
         tracks_json_text = json.dumps(tracks_data, ensure_ascii=False, indent=4)
@@ -5726,6 +6064,11 @@ class PlanEditorMainWindow(QMainWindow):
             summary_layout = QVBoxLayout(summary_dialog)
             intro = QLabel("Будут заменены файлы на сервере:", summary_dialog)
             summary_layout.addWidget(intro)
+            if any(row.get("local_older") for row in rows):
+                warning = QLabel("Внимание: среди заменяемых файлов есть серверные файлы новее загружаемых.", summary_dialog)
+                warning.setStyleSheet("color: #b00020; font-weight: 600;")
+                warning.setWordWrap(True)
+                summary_layout.addWidget(warning)
 
             list_widget = QTreeWidget(summary_dialog)
             list_widget.setColumnCount(4)
@@ -5733,11 +6076,14 @@ class PlanEditorMainWindow(QMainWindow):
             list_widget.setRootIsDecorated(True)
             list_widget.setAlternatingRowColors(True)
             for row in rows:
+                reason = str(row.get("reason", ""))
+                if row.get("local_older"):
+                    reason = f"{reason}; файл на сервере новее"
                 item = QTreeWidgetItem([
                     str(row.get("display_name", "")),
                     format_timestamp(row.get("remote_mtime")),
                     format_timestamp(row.get("local_mtime")),
-                    str(row.get("reason", "")),
+                    reason,
                 ])
                 list_widget.addTopLevelItem(item)
                 for path, server_value, local_value in row.get("json_diffs", []):
@@ -5932,11 +6278,14 @@ class PlanEditorMainWindow(QMainWindow):
                                 replacement_reason = "файл отличается"
 
                         if should_upload:
+                            local_time = local_mtime_for_upload_item(item_type, source)
+                            remote_time = remote_stat.st_mtime or 0
                             filtered_files.append((item_type, remote_path, size_value, display_name, source))
                             replacement_rows.append({
                                 "display_name": display_name,
-                                "remote_mtime": remote_stat.st_mtime or 0,
-                                "local_mtime": local_mtime_for_upload_item(item_type, source),
+                                "remote_mtime": remote_time,
+                                "local_mtime": local_time,
+                                "local_older": bool(local_time and remote_time and local_time < remote_time),
                                 "reason": replacement_reason,
                                 "json_diffs": json_diffs,
                             })
