@@ -843,6 +843,76 @@ class ParamDialog(QDialog):
                 out[lbl] = w.text()
         return out
 
+class AnchorDialog(QDialog):
+    def __init__(self, title: str, default_num=1, default_z_m=0.0, default_extras="",
+                 default_bound=False, default_start=False, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        layout = QFormLayout(self)
+
+        self.num_spin = QSpinBox()
+        self.num_spin.setRange(0, 10000)
+        self.num_spin.setValue(int(default_num or 0))
+        layout.addRow("Номер якоря", self.num_spin)
+
+        self.z_label = QLabel()
+        self.z_spin = QDoubleSpinBox()
+        self.z_spin.setRange(-100.0, 100.0)
+        self.z_spin.setDecimals(1)
+        self.z_spin.setValue(float(default_z_m or 0.0))
+        layout.addRow(self.z_label, self.z_spin)
+
+        self.extras_edit = QLineEdit()
+        self.extras_edit.setText(str(default_extras or ""))
+        layout.addRow("Дополнительные залы (через запятую)", self.extras_edit)
+
+        self.bound_box = QCheckBox("Переходный")
+        self.start_box = QCheckBox("Стартовый")
+        self.bound_box.setChecked(bool(default_bound) and not bool(default_start))
+        self.start_box.setChecked(bool(default_start))
+        layout.addRow(self.bound_box)
+        layout.addRow(self.start_box)
+
+        def sync_flags():
+            if self.start_box.isChecked():
+                self.bound_box.setChecked(False)
+                self.bound_box.setEnabled(False)
+                self.start_box.setEnabled(True)
+                self.z_spin.setMinimum(0.0)
+                if self.z_spin.value() < 0:
+                    self.z_spin.setValue(0.0)
+                self.z_label.setText("Дистанция запуска (м)")
+            elif self.bound_box.isChecked():
+                self.start_box.setChecked(False)
+                self.start_box.setEnabled(False)
+                self.bound_box.setEnabled(True)
+                self.z_spin.setMinimum(-100.0)
+                self.z_label.setText("Координата Z (м)")
+            else:
+                self.bound_box.setEnabled(True)
+                self.start_box.setEnabled(True)
+                self.z_spin.setMinimum(-100.0)
+                self.z_label.setText("Координата Z (м)")
+
+        self.bound_box.toggled.connect(sync_flags)
+        self.start_box.toggled.connect(sync_flags)
+        sync_flags()
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addRow(btns)
+
+    def values(self):
+        extras = [int(tok) for tok in self.extras_edit.text().split(",") if tok.strip().isdigit()]
+        return {
+            "number": self.num_spin.value(),
+            "z_m": float(self.z_spin.value()),
+            "extra_halls": extras,
+            "bound": bool(self.bound_box.isChecked()),
+            "start": bool(self.start_box.isChecked()),
+        }
+
 # ---------------------------------------------------------------------------
 # Dialog to lock objects
 # ---------------------------------------------------------------------------
@@ -879,18 +949,18 @@ def getHallParameters(default_num=1, default_name="", default_w=1.0, default_h=1
     return None
 
 # Z ВВОДИМ В МЕТРАХ
-def getAnchorParameters(default_num=1, default_z_m=0.0, default_extras="", default_bound=False):
-    fields = [
-        {"label": "Номер якоря", "type": "int", "default": default_num, "min": 0, "max": 10000},
-        {"label": "Координата Z (м)", "type": "float", "default": default_z_m, "min": -100.0, "max": 100.0, "decimals": 1},
-        {"label": "Дополнительные залы (через запятую)", "type": "string", "default": default_extras},
-        {"label": "Переходный", "type": "bool", "default": default_bound}
-    ]
-    dlg = ParamDialog("Введите параметры якоря", fields)
+def getAnchorParameters(default_num=1, default_z_m=0.0, default_extras="", default_bound=False, default_start=False):
+    dlg = AnchorDialog(
+        "Введите параметры якоря",
+        default_num,
+        default_z_m,
+        default_extras,
+        default_bound,
+        default_start,
+    )
     if dlg.exec() == QDialog.Accepted:
-        v = dlg.getValues()
-        extras = [int(tok) for tok in v["Дополнительные залы (через запятую)"].split(",") if tok.strip().isdigit()]
-        return v["Номер якоря"], float(v["Координата Z (м)"]), extras, v["Переходный"]
+        v = dlg.values()
+        return v["number"], v["z_m"], v["extra_halls"], v["bound"], v["start"]
     return None
 
 def getZoneParameters(default_num=1, default_type="Входная зона", default_angle=0):
@@ -1341,6 +1411,7 @@ class AnchorItem(QGraphicsEllipseItem):
         self.main_hall_number = main_hall_number; self.extra_halls = []
         self.bound = False
         self.bound_explicit = False
+        self.start = False
         self.setPen(QPen(QColor(255,0,0),2)); self.setBrush(QBrush(QColor(255,0,0)))
         self.setFlags(QGraphicsItem.ItemIsMovable|QGraphicsItem.ItemIsSelectable|QGraphicsItem.ItemSendsGeometryChanges)
         self.tree_item = None
@@ -1352,12 +1423,41 @@ class AnchorItem(QGraphicsEllipseItem):
         anchor_number = float(self.number) if isinstance(self.number, (int, float)) else 0.0
         self.setZValue(10000.0 + anchor_number * 0.001)
 
+    def _start_radius_px(self) -> float:
+        scene = self.scene()
+        if not scene or not self.start:
+            return 0.0
+        return max(0.0, (float(self.z or 0) / 100.0) * scene.pixel_per_cm_x * 100)
+
+    def boundingRect(self):
+        base = self.rect().adjusted(-2, -2, 2, 2)
+        r = self._start_radius_px()
+        if r <= 0:
+            return base
+        return base.united(QRectF(-r - 2, -r - 2, 2 * r + 4, 2 * r + 4))
+
+    def shape(self):
+        path = QPainterPath()
+        path.addEllipse(self.rect())
+        return path
+
     def paint(self, painter, option, widget=None):
+        if self.start:
+            r = self._start_radius_px()
+            if r > 0:
+                painter.save()
+                color = QColor(255, 0, 0)
+                fill = QColor(color)
+                fill.setAlpha(35)
+                painter.setPen(QPen(color, 2))
+                painter.setBrush(QBrush(fill))
+                painter.drawEllipse(QPointF(0, 0), r, r)
+                painter.restore()
         super().paint(painter, option, widget)
         painter.save()
         font = QFont(); font.setBold(True); painter.setFont(font)
         fill = self.pen().color(); outline = QColor(180,180,180)
-        br = self.boundingRect()
+        br = self.rect()
         pos = QPointF(br.center().x()-br.width()/2, br.top()-4)
         path = QPainterPath(); path.addText(pos, font, str(self.number))
         painter.setPen(QPen(outline,2)); painter.drawPath(path); painter.fillPath(path, fill)
@@ -1465,28 +1565,83 @@ class AnchorItem(QGraphicsEllipseItem):
         edit = menu.addAction("Редактировать"); delete = menu.addAction("Удалить")
         act = menu.exec(global_pos)
         if act == edit:
-            fields = [
-                {"label": "Номер якоря", "type": "int", "default": self.number, "min": 0, "max": 10000},
-                {"label":"Координата X (м)","type":"float","default":x_m,"min":-1000.0,"max":10000,"decimals":1},
-                {"label":"Координата Y (м)","type":"float","default":y_m,"min":-1000.0,"max":10000,"decimals":1},
-                {"label":"Координата Z (м)","type":"float","default":z_m,"min":-100,"max":100,"decimals":1},
-                {"label":"Доп. залы","type":"string","default":",".join(str(x) for x in self.extra_halls)},
-                {"label":"Переходный","type":"bool","default":self.bound}
-            ]
-            dlg = ParamDialog("Редактировать якорь", fields, mw)
+            dlg = QDialog(mw)
+            dlg.setWindowTitle("Редактировать якорь")
+            form = QFormLayout(dlg)
+            num_spin = QSpinBox()
+            num_spin.setRange(0, 10000)
+            num_spin.setValue(int(self.number or 0))
+            form.addRow("Номер якоря", num_spin)
+            x_spin = QDoubleSpinBox()
+            x_spin.setRange(-1000.0, 10000.0)
+            x_spin.setDecimals(1)
+            x_spin.setValue(x_m)
+            form.addRow("Координата X (м)", x_spin)
+            y_spin = QDoubleSpinBox()
+            y_spin.setRange(-1000.0, 10000.0)
+            y_spin.setDecimals(1)
+            y_spin.setValue(y_m)
+            form.addRow("Координата Y (м)", y_spin)
+            z_label = QLabel()
+            z_spin = QDoubleSpinBox()
+            z_spin.setRange(-100.0, 100.0)
+            z_spin.setDecimals(1)
+            z_spin.setValue(z_m)
+            form.addRow(z_label, z_spin)
+            extras_edit = QLineEdit(",".join(str(x) for x in self.extra_halls))
+            form.addRow("Доп. залы", extras_edit)
+            bound_box = QCheckBox("Переходный")
+            start_box = QCheckBox("Стартовый")
+            bound_box.setChecked(bool(self.bound) and not bool(self.start))
+            start_box.setChecked(bool(self.start))
+            form.addRow(bound_box)
+            form.addRow(start_box)
+
+            def sync_flags():
+                if start_box.isChecked():
+                    bound_box.setChecked(False)
+                    bound_box.setEnabled(False)
+                    start_box.setEnabled(True)
+                    z_spin.setMinimum(0.0)
+                    if z_spin.value() < 0:
+                        z_spin.setValue(0.0)
+                    z_label.setText("Дистанция запуска (м)")
+                elif bound_box.isChecked():
+                    start_box.setChecked(False)
+                    start_box.setEnabled(False)
+                    bound_box.setEnabled(True)
+                    z_spin.setMinimum(-100.0)
+                    z_label.setText("Координата Z (м)")
+                else:
+                    bound_box.setEnabled(True)
+                    start_box.setEnabled(True)
+                    z_spin.setMinimum(-100.0)
+                    z_label.setText("Координата Z (м)")
+
+            bound_box.toggled.connect(sync_flags)
+            start_box.toggled.connect(sync_flags)
+            sync_flags()
+            btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+            btns.accepted.connect(dlg.accept)
+            btns.rejected.connect(dlg.reject)
+            form.addRow(btns)
             if dlg.exec() == QDialog.Accepted:
                 prev_state = mw.capture_state()
-                v = dlg.getValues()
-                self.number = v["Номер якоря"]
-                x2, y2, z2 = v["Координата X (м)"], v["Координата Y (м)"], v["Координата Z (м)"]
-                self.bound = v["Переходный"]
+                self.prepareGeometryChange()
+                self.number = num_spin.value()
+                x2, y2, z2 = x_spin.value(), y_spin.value(), z_spin.value()
+                self.start = start_box.isChecked()
+                self.bound = bound_box.isChecked() and not self.start
                 self.bound_explicit = self.bound
-                self.extra_halls = [int(tok) for tok in v["Доп. залы"].split(",") if tok.strip().isdigit()]
+                self.extra_halls = [int(tok) for tok in extras_edit.text().split(",") if tok.strip().isdigit()]
+                for zone in [z for z in mw.proximity_zones if z.anchor is self]:
+                    zone.prepareGeometryChange()
                 self.z = int(round(z2*100))
                 px = x2 * ppcm * 100
                 py = hall.rect().height() - y2 * ppcm * 100
                 self.setPos(hall.mapToScene(QPointF(px, py)))
                 self.update_zvalue()
+                self.scene().update()
                 mw.last_selected_items = []; mw.populate_tree()
                 mw.push_undo_state(prev_state)
         elif act == delete:
@@ -1749,7 +1904,36 @@ class ProximityZoneItem(QGraphicsItem):
     def _radius_px(self, meters: float) -> float:
         if not self.scene():
             return 0.0
-        return max(0.0, meters * self.scene().pixel_per_cm_x * 100)
+        projected_radius_m = self._projected_radius_m(meters)
+        if projected_radius_m <= 0 and float(meters or 0.0) > 0:
+            return 8.0
+        return max(0.0, projected_radius_m * self.scene().pixel_per_cm_x * 100)
+
+    def _human_height_cm(self) -> float:
+        default_height = 130.0
+        scene = self.scene()
+        mainwindow = getattr(scene, "mainwindow", None) if scene else None
+        if mainwindow is None:
+            return default_height
+        settings_data = mainwindow._load_system_config("settings.json")
+        coord_sp = settings_data.get("coord_sp") if isinstance(settings_data, dict) else None
+        if not isinstance(coord_sp, dict):
+            return default_height
+        try:
+            return float(coord_sp.get("human_height", default_height))
+        except (TypeError, ValueError):
+            return default_height
+
+    def _projected_radius_m(self, sphere_radius_m: float) -> float:
+        sphere_radius_m = max(0.0, float(sphere_radius_m or 0.0))
+        if sphere_radius_m <= 0:
+            return 0.0
+        anchor_height_cm = float(getattr(self.anchor, "z", 0) or 0)
+        height_delta_m = (anchor_height_cm - self._human_height_cm()) / 100.0
+        projected_sq = sphere_radius_m * sphere_radius_m - height_delta_m * height_delta_m
+        if projected_sq <= 0:
+            return 0.0
+        return math.sqrt(projected_sq)
 
     def boundingRect(self):
         r = max(self._radius_px(self.dist_in), self._radius_px(self.dist_out))
@@ -2094,11 +2278,12 @@ class PlanGraphicsScene(QGraphicsScene):
                 if not params:
                     mw.add_mode=None; mw.statusBar().clearMessage(); return
                 prev_state = mw.capture_state()
-                num, z_m, extras, bound = params  # z в метрах
+                num, z_m, extras, bound, start = params  # z в метрах
                 a = AnchorItem(pos.x(), pos.y(), num, main_hall_number=hall.number, scene=self)
                 a.z = int(round(z_m * 100))       # храним в см
-                a.extra_halls, a.bound = extras, bound
-                a.bound_explicit = bound
+                a.extra_halls, a.start = extras, bool(start)
+                a.bound = bool(bound) and not a.start
+                a.bound_explicit = a.bound
                 self.addItem(a); mw.anchors.append(a)
                 mw.add_mode=None; mw.statusBar().clearMessage(); mw.populate_tree()
                 mw.push_undo_state(prev_state)
@@ -2311,6 +2496,7 @@ class PlanEditorMainWindow(QMainWindow):
         self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tree.customContextMenuRequested.connect(self.on_tree_context_menu)
         self.tree.itemDoubleClicked.connect(self.on_tree_item_double_clicked)
+        self.tree.itemSelectionChanged.connect(self._update_hall_order_buttons)
 
         dock_container = QWidget()
         dock_container.setObjectName("dockContainer")
@@ -2321,6 +2507,17 @@ class PlanEditorMainWindow(QMainWindow):
         dock_frame.setObjectName("dockFrame")
         dock_frame_layout = QVBoxLayout(dock_frame)
         dock_frame_layout.setContentsMargins(0, 0, 0, 0)
+        hall_order_layout = QHBoxLayout()
+        hall_order_layout.setContentsMargins(6, 6, 6, 2)
+        hall_order_layout.addWidget(QLabel("Порядок залов:", dock_frame))
+        hall_order_layout.addStretch(1)
+        self.move_hall_up_button = QPushButton("Вверх", dock_frame)
+        self.move_hall_down_button = QPushButton("Вниз", dock_frame)
+        self.move_hall_up_button.clicked.connect(lambda: self.move_selected_hall(-1))
+        self.move_hall_down_button.clicked.connect(lambda: self.move_selected_hall(1))
+        hall_order_layout.addWidget(self.move_hall_up_button)
+        hall_order_layout.addWidget(self.move_hall_down_button)
+        dock_frame_layout.addLayout(hall_order_layout)
         dock_frame_layout.addWidget(self.tree)
 
         dock_container.setStyleSheet(
@@ -2879,6 +3076,23 @@ class PlanEditorMainWindow(QMainWindow):
         if not show_errors:
             self.statusBar().showMessage("Не удалось синхронизировать rooms/tracks с текущим состоянием проекта.", 5000)
         return False
+
+    def _sync_project_file_and_auxiliary_configs(self, show_errors: bool = True) -> bool:
+        if not self.current_project_file:
+            return False
+        data = self._collect_project_data()
+        try:
+            self._ensure_project_paths(self.current_project_file)
+            with open(self.current_project_file, "w", encoding="utf-8") as project_file:
+                json.dump(data, project_file, ensure_ascii=False, indent=4)
+        except Exception as exc:
+            if show_errors:
+                QMessageBox.critical(self, "Ошибка", f"Не удалось синхронизировать файл проекта:\n{exc}")
+            else:
+                self.statusBar().showMessage("Не удалось синхронизировать файл проекта.", 5000)
+            return False
+        remember_last_used_path(self.current_project_file)
+        return self._sync_auxiliary_configs_from_current_state(show_errors=show_errors)
 
     @staticmethod
     def _merge_audio_info_preserving_track_settings(existing_info: dict | None, incoming_info: dict | None) -> dict | None:
@@ -3581,6 +3795,8 @@ class PlanEditorMainWindow(QMainWindow):
                 "extra_halls": list(anchor.extra_halls),
                 "bound": anchor.bound_explicit
             }
+            if anchor.start:
+                anchor_data["start"] = True
             data["anchors"].append(anchor_data)
         for zone in self.proximity_zones:
             zone_data = {
@@ -3672,7 +3888,10 @@ class PlanEditorMainWindow(QMainWindow):
                 )
                 anchor.z = anchor_data.get("z", 0)
                 anchor.extra_halls = list(anchor_data.get("extra_halls", []))
+                anchor.start = bool(anchor_data.get("start", False))
                 anchor.bound = bool(anchor_data.get("bound", False))
+                if anchor.start:
+                    anchor.bound = False
                 anchor.bound_explicit = anchor.bound
                 self.scene.addItem(anchor)
                 self.anchors.append(anchor)
@@ -3879,6 +4098,46 @@ class PlanEditorMainWindow(QMainWindow):
             if zone and hasattr(zone, 'open_menu'):
                 zone.open_menu(global_pos)
 
+    def _selected_tree_hall(self):
+        item = self.tree.currentItem()
+        if item is None:
+            return None
+        data = item.data(0, Qt.UserRole)
+        if not isinstance(data, dict) or data.get("type") != "hall":
+            return None
+        hall = data.get("ref")
+        return hall if isinstance(hall, HallItem) and hall in self.halls else None
+
+    def _update_hall_order_buttons(self):
+        if not hasattr(self, "move_hall_up_button") or not hasattr(self, "move_hall_down_button"):
+            return
+        hall = self._selected_tree_hall()
+        index = self.halls.index(hall) if hall in self.halls else -1
+        has_hall = index >= 0
+        self.move_hall_up_button.setEnabled(has_hall and index > 0)
+        self.move_hall_down_button.setEnabled(has_hall and index < len(self.halls) - 1)
+
+    def move_selected_hall(self, direction: int):
+        hall = self._selected_tree_hall()
+        if hall is None:
+            return
+        old_index = self.halls.index(hall)
+        new_index = old_index + (-1 if direction < 0 else 1)
+        if new_index < 0 or new_index >= len(self.halls):
+            return
+        prev_state = self.capture_state()
+        self.halls.pop(old_index)
+        self.halls.insert(new_index, hall)
+        self.populate_tree()
+        if getattr(hall, "tree_item", None):
+            self.tree.setCurrentItem(hall.tree_item)
+            hall.tree_item.setSelected(True)
+        self._update_hall_order_buttons()
+        self.push_undo_state(prev_state)
+        self.populate_tracks_table()
+        if self.current_project_file:
+            self._sync_project_file_and_auxiliary_configs(show_errors=False)
+
     # Misc
     def handle_wheel_event(self, event):
         factor = 1.2 if event.angleDelta().y()>0 else 1/1.2
@@ -3946,6 +4205,8 @@ class PlanEditorMainWindow(QMainWindow):
                     xm = fix_negative_zero(round(lp.x()/(self.scene.pixel_per_cm_x*100),1))
                     ym = fix_negative_zero(round((h.rect().height()-lp.y())/(self.scene.pixel_per_cm_x*100),1))
                     at = f'Якорь {a.number} (x={xm} м, y={ym} м, z={fix_negative_zero(round(a.z/100,1))} м)'
+                    if a.start:
+                        at += " [стартовый]"
                     ai = QTreeWidgetItem([at]); a.tree_item = ai; hi.addChild(ai)
                     ai.setData(0, Qt.UserRole, {"type":"anchor","ref":a})
 
@@ -3991,6 +4252,7 @@ class PlanEditorMainWindow(QMainWindow):
 
             hi.setExpanded(True)
 
+        self._update_hall_order_buttons()
         self.populate_tracks_table()
 
     def set_mode(self, mode):
@@ -4214,6 +4476,8 @@ class PlanEditorMainWindow(QMainWindow):
             }
             if a.bound_explicit:
                 ad["bound"] = True
+            if a.start:
+                ad["start"] = True
             data["anchors"].append(ad)
         for z in self.proximity_zones:
             zd = {
@@ -4580,7 +4844,10 @@ class PlanEditorMainWindow(QMainWindow):
             if not self.current_project_file:
                 QMessageBox.warning(self, "Настройки проекта", "Настройки проекта не сохранены: сначала сохраните проект.")
                 return
+            for zone in self.proximity_zones:
+                zone.prepareGeometryChange()
             self._write_system_configs(_collect_system_configs_from_widgets())
+            self.scene.update()
 
     def save_project(self):
         target = self.current_project_file
@@ -4767,9 +5034,11 @@ class PlanEditorMainWindow(QMainWindow):
                 scene_pos = hall.mapToScene(QPointF(px, py))
                 anchor_item = AnchorItem(scene_pos.x(), scene_pos.y(), anchor_id, main_hall_number=hall.number, scene=self.scene)
                 anchor_item.z = int(round(z_m * 100))
-                if anchor_data.get("bound"):
-                    anchor_item.bound = True
-                    anchor_item.bound_explicit = True
+                anchor_item.start = bool(anchor_data.get("start", False))
+                anchor_item.bound = bool(anchor_data.get("bound", False)) and not anchor_item.start
+                if anchor_item.start:
+                    anchor_item.bound = False
+                anchor_item.bound_explicit = anchor_item.bound
                 self.scene.addItem(anchor_item)
                 self.anchors.append(anchor_item)
                 changed = True
@@ -5089,6 +5358,8 @@ class PlanEditorMainWindow(QMainWindow):
         self._merge_existing_tracks_metadata(tracks_data)
         if not self._write_auxiliary_configs(rooms_json_text, tracks_data):
             return
+        if not self._sync_project_file_and_auxiliary_configs(show_errors=True):
+            return
         self.populate_tracks_table()
 
         message_lines = [
@@ -5173,9 +5444,11 @@ class PlanEditorMainWindow(QMainWindow):
             )
             a.z = ad.get("z",0)
             a.extra_halls = ad.get("extra_halls",[])
-            if ad.get("bound"):
-                a.bound = True
-                a.bound_explicit = True
+            a.start = bool(ad.get("start", False))
+            a.bound = bool(ad.get("bound", False)) and not a.start
+            if a.start:
+                a.bound = False
+            a.bound_explicit = a.bound
             self.scene.addItem(a); self.anchors.append(a); anchor_map[a.number] = a
         for zd in data.get("proximity_zones", []):
             anchor = anchor_map.get(zd.get("anchor_id"))
@@ -5458,14 +5731,30 @@ class PlanEditorMainWindow(QMainWindow):
                     normalized = normalized[len("content/"):]
                 return normalized
 
-            def show_download_replacement_summary(rows: list[dict]) -> bool:
+            def collect_local_existing_audio_names(content_dir: str) -> set[str]:
+                if not content_dir or not os.path.isdir(content_dir):
+                    return set()
+                result: set[str] = set()
+                for root, _, files in os.walk(content_dir):
+                    for filename in files:
+                        if not filename.lower().endswith(".mp3"):
+                            continue
+                        full_path = os.path.join(root, filename)
+                        result.add(os.path.relpath(full_path, content_dir).replace("\\", "/"))
+                return result
+
+            def show_download_replacement_summary(rows: list[dict]) -> list[str] | None:
                 summary_dialog = QDialog(self)
                 summary_dialog.setWindowTitle("Подтверждение замены файлов")
                 summary_dialog.resize(820, 540)
                 summary_layout = QVBoxLayout(summary_dialog)
                 summary_layout.addWidget(QLabel("Будут заменены локальные файлы:", summary_dialog))
                 if any(row.get("local_newer") for row in rows):
-                    warning = QLabel("Внимание: среди заменяемых файлов есть локальные файлы новее серверных.", summary_dialog)
+                    warning = QLabel(
+                        "Внимание: среди заменяемых файлов есть локальные файлы новее серверных. "
+                        "Такие файлы не выбраны по умолчанию.",
+                        summary_dialog,
+                    )
                     warning.setStyleSheet("color: #b00020; font-weight: 600;")
                     warning.setWordWrap(True)
                     summary_layout.addWidget(warning)
@@ -5475,16 +5764,21 @@ class PlanEditorMainWindow(QMainWindow):
                 list_widget.setHeaderLabels(["Файл / параметр", "Локально", "На сервере", "Причина"])
                 list_widget.setRootIsDecorated(True)
                 list_widget.setAlternatingRowColors(True)
+                selectable_rows: dict[str, QTreeWidgetItem] = {}
                 for row in rows:
+                    display_name = str(row.get("display_name", ""))
                     reason = str(row.get("reason", ""))
                     if row.get("local_newer"):
                         reason = f"{reason}; локальный файл новее"
                     item = QTreeWidgetItem([
-                        str(row.get("display_name", "")),
+                        display_name,
                         format_timestamp(row.get("local_mtime")),
                         format_timestamp(row.get("remote_mtime")),
                         reason,
                     ])
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(0, Qt.Unchecked if row.get("local_newer") else Qt.Checked)
+                    selectable_rows[display_name] = item
                     list_widget.addTopLevelItem(item)
                     for path, server_value, local_value in row.get("json_diffs", []):
                         child = QTreeWidgetItem([str(path), str(local_value), str(server_value), "параметр изменён"])
@@ -5504,7 +5798,43 @@ class PlanEditorMainWindow(QMainWindow):
                 buttons.accepted.connect(summary_dialog.accept)
                 buttons.rejected.connect(summary_dialog.reject)
                 summary_layout.addWidget(buttons)
-                return summary_dialog.exec() == QDialog.Accepted
+                if summary_dialog.exec() != QDialog.Accepted:
+                    return None
+                skipped = [
+                    display_name
+                    for display_name, item in selectable_rows.items()
+                    if item.checkState(0) != Qt.Checked
+                ]
+                return skipped
+
+            def ask_missing_audio_action(title: str, message: str, names: list[str]) -> str:
+                dialog = QDialog(self)
+                dialog.setWindowTitle(title)
+                dialog.resize(620, 420)
+                layout = QVBoxLayout(dialog)
+                label = QLabel(message, dialog)
+                label.setWordWrap(True)
+                layout.addWidget(label)
+                list_widget = QListWidget(dialog)
+                list_widget.addItems(names)
+                layout.addWidget(list_widget, 1)
+                buttons = QDialogButtonBox(dialog)
+                delete_button = buttons.addButton("Удалить", QDialogButtonBox.AcceptRole)
+                keep_button = buttons.addButton("Оставить", QDialogButtonBox.DestructiveRole)
+                cancel_button = buttons.addButton("Отмена", QDialogButtonBox.RejectRole)
+                result = {"action": "cancel"}
+
+                def choose(action: str):
+                    result["action"] = action
+                    dialog.accept()
+
+                delete_button.clicked.connect(lambda: choose("delete"))
+                keep_button.clicked.connect(lambda: choose("keep"))
+                cancel_button.clicked.connect(dialog.reject)
+                layout.addWidget(buttons)
+                if dialog.exec() != QDialog.Accepted:
+                    return "cancel"
+                return result["action"]
 
             def remote_excursion_folder_name() -> str:
                 excurs_payload = read_remote_bytes(posixpath.join(remote_project_dir, "excurs.json"))
@@ -5530,6 +5860,7 @@ class PlanEditorMainWindow(QMainWindow):
                         remote_files.append((remote_path, relative_path, int(remote_entry.st_size or 0)))
 
             download_items: list[tuple[str, str, str, int, float]] = []
+            local_audio_to_delete: list[tuple[str, str]] = []
             if update_current_project:
                 if not self._ensure_project_layout_for_current_file():
                     return
@@ -5589,6 +5920,12 @@ class PlanEditorMainWindow(QMainWindow):
                 remote_tracks_data = decode_json_payload(read_remote_bytes(remote_tracks_path))
                 local_crc_map = extract_track_crc_map(local_tracks_data)
                 remote_crc_map = extract_track_crc_map(remote_tracks_data)
+                local_existing_audio_names = collect_local_existing_audio_names(os.path.join(local_project_root, "content"))
+                remote_existing_audio_names = {
+                    normalized_audio_key(display_name)
+                    for _, _, display_name, _, _ in download_items
+                    if is_audio_display_name(display_name)
+                }
                 filtered_items: list[tuple[str, str, str, int, float]] = []
                 replacement_rows: list[dict] = []
                 compare_dialog = QProgressDialog("Сравнение файлов...", "Отмена", 0, len(download_items), self)
@@ -5658,13 +5995,62 @@ class PlanEditorMainWindow(QMainWindow):
                 finally:
                     compare_dialog.close()
 
+                extra_local_audio = sorted(local_existing_audio_names - remote_existing_audio_names, key=str.lower)
+                if extra_local_audio:
+                    action = ask_missing_audio_action(
+                        "Отсутствующие аудиофайлы",
+                        "В загружаемом проекте с сервера нет некоторых аудиофайлов, которые есть в текущем локальном проекте. Что сделать с этими файлами?",
+                        extra_local_audio,
+                    )
+                    if action == "cancel":
+                        self.statusBar().showMessage("Обновление проекта отменено.", 5000)
+                        return
+                    if action == "delete":
+                        for audio_name in extra_local_audio:
+                            local_audio_to_delete.append((
+                                audio_name,
+                                os.path.join(local_project_root, "content", *audio_name.replace("\\", "/").split("/")),
+                            ))
+
                 if not filtered_items:
+                    if local_audio_to_delete:
+                        for audio_name, local_path in local_audio_to_delete:
+                            try:
+                                if os.path.isfile(local_path):
+                                    os.remove(local_path)
+                            except OSError as exc:
+                                raise IOError(f"Не удалось удалить локальный аудиофайл {audio_name}: {exc}") from exc
+                        QMessageBox.information(self, "Обновление проекта с сервера", "Лишние локальные аудиофайлы удалены.")
+                        self.statusBar().showMessage("Обновление завершено: лишние локальные аудиофайлы удалены.", 7000)
+                        return
                     QMessageBox.information(self, "Обновление проекта с сервера", "Локальный проект уже актуален. Загружать нечего.")
                     self.statusBar().showMessage("Обновление не требуется: локальная версия актуальна.", 7000)
                     return
-                if replacement_rows and not show_download_replacement_summary(replacement_rows):
-                    self.statusBar().showMessage("Обновление проекта отменено.", 5000)
-                    return
+                if replacement_rows:
+                    skipped_replacements = show_download_replacement_summary(replacement_rows)
+                    if skipped_replacements is None:
+                        self.statusBar().showMessage("Обновление проекта отменено.", 5000)
+                        return
+                    if skipped_replacements:
+                        skipped_names = set(skipped_replacements)
+                        filtered_items = [
+                            item for item in filtered_items
+                            if item[2] not in skipped_names
+                        ]
+                        if not filtered_items:
+                            if local_audio_to_delete:
+                                for audio_name, local_path in local_audio_to_delete:
+                                    try:
+                                        if os.path.isfile(local_path):
+                                            os.remove(local_path)
+                                    except OSError as exc:
+                                        raise IOError(f"Не удалось удалить локальный аудиофайл {audio_name}: {exc}") from exc
+                                QMessageBox.information(self, "Обновление проекта с сервера", "Лишние локальные аудиофайлы удалены.")
+                                self.statusBar().showMessage("Обновление завершено: лишние локальные аудиофайлы удалены.", 7000)
+                                return
+                            QMessageBox.information(self, "Обновление проекта с сервера", "Файлы для замены не выбраны.")
+                            self.statusBar().showMessage("Обновление не выполнено: файлы для замены не выбраны.", 7000)
+                            return
                 download_items = filtered_items
             else:
                 collect_remote_files(remote_project_dir)
@@ -5719,6 +6105,13 @@ class PlanEditorMainWindow(QMainWindow):
                             os.utime(local_path, (remote_mtime, remote_mtime))
                         except OSError:
                             pass
+                if update_current_project:
+                    for audio_name, local_path in local_audio_to_delete:
+                        try:
+                            if os.path.isfile(local_path):
+                                os.remove(local_path)
+                        except OSError as exc:
+                            raise IOError(f"Не удалось удалить локальный аудиофайл {audio_name}: {exc}") from exc
                 progress_dialog.setValue(100)
                 progress_dialog.setLabelText("Загрузка завершена")
                 QApplication.processEvents()
@@ -5745,6 +6138,8 @@ class PlanEditorMainWindow(QMainWindow):
             current_file = self.current_project_file
             if current_file and os.path.isfile(current_file):
                 self._load_project_file(current_file)
+                self._sync_project_file_and_auxiliary_configs(show_errors=False)
+                self._mark_state_as_saved()
             self.statusBar().showMessage("Текущий проект обновлён с сервера.", 7000)
             QMessageBox.information(self, "Обновление проекта с сервера", "Текущий проект обновлён с сервера.")
             return
@@ -5790,7 +6185,8 @@ class PlanEditorMainWindow(QMainWindow):
 
     def upload_config_to_server(self):
         if self.current_project_file:
-            self._sync_auxiliary_configs_from_current_state(show_errors=False)
+            if not self._sync_project_file_and_auxiliary_configs(show_errors=True):
+                return
         rooms_json_text, tracks_data = self._prepare_export_payload()
         self._merge_unmatched_audio_files_into_tracks_data(tracks_data)
         self._merge_language_audio_files_into_tracks_data(tracks_data)
@@ -5942,7 +6338,22 @@ class PlanEditorMainWindow(QMainWindow):
                     result[name.replace("\\", "/")] = crc
             return result
 
+        def collect_local_existing_audio_names() -> set[str]:
+            content_dir = self._get_effective_content_dir()
+            if not content_dir or not os.path.isdir(content_dir):
+                return set()
+            result: set[str] = set()
+            for root, _, files in os.walk(content_dir):
+                for filename in files:
+                    if not filename.lower().endswith(".mp3"):
+                        continue
+                    full_path = os.path.join(root, filename)
+                    rel_path = os.path.relpath(full_path, content_dir).replace("\\", "/")
+                    result.add(rel_path)
+            return result
+
         local_track_crc_map = extract_track_crc_map(tracks_data)
+        local_existing_audio_names = collect_local_existing_audio_names()
 
         def remote_track_crc_map(remote_tracks_path: str) -> dict[str, str]:
             payload = read_remote_bytes(remote_tracks_path)
@@ -5953,6 +6364,25 @@ class PlanEditorMainWindow(QMainWindow):
             except Exception:
                 return {}
             return extract_track_crc_map(remote_data)
+
+        def collect_remote_existing_audio_paths(remote_content_dir: str) -> dict[str, str]:
+            result: dict[str, str] = {}
+
+            def walk(remote_dir: str, relative_dir: str = ""):
+                try:
+                    entries = sftp.listdir_attr(remote_dir)
+                except IOError:
+                    return
+                for entry in entries:
+                    remote_path = posixpath.join(remote_dir, entry.filename)
+                    relative_path = posixpath.join(relative_dir, entry.filename) if relative_dir else entry.filename
+                    if stat.S_ISDIR(entry.st_mode or 0):
+                        walk(remote_path, relative_path)
+                    elif entry.filename.lower().endswith(".mp3"):
+                        result[relative_path.replace("\\", "/")] = remote_path
+
+            walk(remote_content_dir)
+            return result
 
         def local_payload_for_upload_item(item_type: str, source: str) -> bytes | None:
             if item_type == "bytes":
@@ -6057,7 +6487,7 @@ class PlanEditorMainWindow(QMainWindow):
             except (TypeError, ValueError, OSError):
                 return "неизвестно"
 
-        def show_replacement_summary(rows: list[dict]) -> bool:
+        def show_replacement_summary(rows: list[dict]) -> list[str] | None:
             summary_dialog = QDialog(self)
             summary_dialog.setWindowTitle("Подтверждение замены файлов")
             summary_dialog.resize(760, 520)
@@ -6065,7 +6495,11 @@ class PlanEditorMainWindow(QMainWindow):
             intro = QLabel("Будут заменены файлы на сервере:", summary_dialog)
             summary_layout.addWidget(intro)
             if any(row.get("local_older") for row in rows):
-                warning = QLabel("Внимание: среди заменяемых файлов есть серверные файлы новее загружаемых.", summary_dialog)
+                warning = QLabel(
+                    "Внимание: среди заменяемых файлов есть серверные файлы новее загружаемых. "
+                    "Такие файлы не выбраны по умолчанию.",
+                    summary_dialog,
+                )
                 warning.setStyleSheet("color: #b00020; font-weight: 600;")
                 warning.setWordWrap(True)
                 summary_layout.addWidget(warning)
@@ -6075,16 +6509,21 @@ class PlanEditorMainWindow(QMainWindow):
             list_widget.setHeaderLabels(["Файл / параметр", "На сервере", "Загружается", "Причина"])
             list_widget.setRootIsDecorated(True)
             list_widget.setAlternatingRowColors(True)
+            selectable_rows: dict[str, QTreeWidgetItem] = {}
             for row in rows:
+                display_name = str(row.get("display_name", ""))
                 reason = str(row.get("reason", ""))
                 if row.get("local_older"):
                     reason = f"{reason}; файл на сервере новее"
                 item = QTreeWidgetItem([
-                    str(row.get("display_name", "")),
+                    display_name,
                     format_timestamp(row.get("remote_mtime")),
                     format_timestamp(row.get("local_mtime")),
                     reason,
                 ])
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(0, Qt.Unchecked if row.get("local_older") else Qt.Checked)
+                selectable_rows[display_name] = item
                 list_widget.addTopLevelItem(item)
                 for path, server_value, local_value in row.get("json_diffs", []):
                     child = QTreeWidgetItem([
@@ -6109,7 +6548,43 @@ class PlanEditorMainWindow(QMainWindow):
             buttons.accepted.connect(summary_dialog.accept)
             buttons.rejected.connect(summary_dialog.reject)
             summary_layout.addWidget(buttons)
-            return summary_dialog.exec() == QDialog.Accepted
+            if summary_dialog.exec() != QDialog.Accepted:
+                return None
+            skipped = [
+                display_name
+                for display_name, item in selectable_rows.items()
+                if item.checkState(0) != Qt.Checked
+            ]
+            return skipped
+
+        def ask_missing_audio_action(title: str, message: str, names: list[str]) -> str:
+            dialog = QDialog(self)
+            dialog.setWindowTitle(title)
+            dialog.resize(620, 420)
+            layout = QVBoxLayout(dialog)
+            label = QLabel(message, dialog)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            list_widget = QListWidget(dialog)
+            list_widget.addItems(names)
+            layout.addWidget(list_widget, 1)
+            buttons = QDialogButtonBox(dialog)
+            delete_button = buttons.addButton("Удалить", QDialogButtonBox.AcceptRole)
+            keep_button = buttons.addButton("Оставить", QDialogButtonBox.DestructiveRole)
+            cancel_button = buttons.addButton("Отмена", QDialogButtonBox.RejectRole)
+            result = {"action": "cancel"}
+
+            def choose(action: str):
+                result["action"] = action
+                dialog.accept()
+
+            delete_button.clicked.connect(lambda: choose("delete"))
+            keep_button.clicked.connect(lambda: choose("keep"))
+            cancel_button.clicked.connect(dialog.reject)
+            layout.addWidget(buttons)
+            if dialog.exec() != QDialog.Accepted:
+                return "cancel"
+            return result["action"]
 
         try:
             ssh = paramiko.SSHClient()
@@ -6140,6 +6615,7 @@ class PlanEditorMainWindow(QMainWindow):
                 base_dir.rstrip("/") == default_projects_dir.rstrip("/")
             )
 
+            remote_audio_to_delete: list[tuple[str, str]] = []
             if is_direct_ftpradiog_upload:
                 project_label = self._project_label_for_configs()
                 export_folder_name = self._sanitize_name_for_folder(project_label) or project_label
@@ -6151,15 +6627,17 @@ class PlanEditorMainWindow(QMainWindow):
 
             nested_project_dir = posixpath.join(normalized_target_directory, excursion_folder_name())
             tracks_content_dir = posixpath.join(nested_project_dir, "content")
-            ensure_remote_dirs(tracks_content_dir)
+            if upload_full_project:
+                ensure_remote_dirs(tracks_content_dir)
 
             rooms_remote_path = posixpath.join(normalized_target_directory, "rooms.json")
             tracks_remote_path = posixpath.join(tracks_content_dir, "tracks.json")
 
             files_to_upload: list[tuple[str, str, int, str, str]] = [
                 ("bytes", rooms_remote_path, len(rooms_bytes), "rooms.json", "rooms.json"),
-                ("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"),
             ]
+            if upload_full_project:
+                files_to_upload.append(("bytes", tracks_remote_path, len(tracks_bytes), "tracks.json", "tracks.json"))
             for filename, payload in system_config_bytes.items():
                 files_to_upload.append((
                     "bytes",
@@ -6170,17 +6648,9 @@ class PlanEditorMainWindow(QMainWindow):
                 ))
 
             project_file_remote = ""
-            local_project_file = ""
+            local_project_file = os.path.abspath(self.current_project_file) if self.current_project_file else ""
             local_root_dir = ""
-
-            if upload_full_project:
-                if not self._ensure_project_layout_for_current_file():
-                    return
-                local_project_file = os.path.abspath(self.current_project_file) if self.current_project_file else ""
-                local_root_dir = self._get_effective_project_root_dir()
-                if not local_project_file or not local_root_dir or not os.path.isdir(local_root_dir):
-                    raise IOError("Не удалось определить структуру локального проекта для полной выгрузки.")
-
+            if local_project_file and os.path.isfile(local_project_file):
                 project_file_remote = posixpath.join(normalized_target_directory, os.path.basename(local_project_file))
                 files_to_upload.append((
                     "file",
@@ -6189,6 +6659,13 @@ class PlanEditorMainWindow(QMainWindow):
                     os.path.basename(local_project_file),
                     local_project_file,
                 ))
+
+            if upload_full_project:
+                if not self._ensure_project_layout_for_current_file():
+                    return
+                local_root_dir = self._get_effective_project_root_dir()
+                if not local_project_file or not local_root_dir or not os.path.isdir(local_root_dir):
+                    raise IOError("Не удалось определить структуру локального проекта для полной выгрузки.")
 
                 root_remote_dir = nested_project_dir if is_direct_ftpradiog_upload else posixpath.join(normalized_target_directory, os.path.basename(local_root_dir))
                 ensure_remote_dirs(root_remote_dir)
@@ -6214,6 +6691,7 @@ class PlanEditorMainWindow(QMainWindow):
 
             if is_direct_ftpradiog_upload:
                 remote_crc_map = remote_track_crc_map(tracks_remote_path)
+                remote_existing_audio_paths = collect_remote_existing_audio_paths(tracks_content_dir) if upload_full_project else {}
                 filtered_files: list[tuple[str, str, int, str, str]] = []
                 replacement_rows: list[dict] = []
                 compare_dialog = QProgressDialog("Сравнение файлов...", "Отмена", 0, len(files_to_upload), self)
@@ -6294,15 +6772,70 @@ class PlanEditorMainWindow(QMainWindow):
                 finally:
                     compare_dialog.close()
 
+                extra_remote_audio = sorted(set(remote_existing_audio_paths) - local_existing_audio_names, key=str.lower) if upload_full_project else []
+                existing_extra_remote_audio = []
+                for audio_name in extra_remote_audio:
+                    remote_path = remote_existing_audio_paths.get(audio_name) or posixpath.join(tracks_content_dir, audio_name.replace("\\", "/"))
+                    try:
+                        sftp.stat(remote_path)
+                    except IOError:
+                        continue
+                    existing_extra_remote_audio.append(audio_name)
+                extra_remote_audio = existing_extra_remote_audio
+                if extra_remote_audio:
+                    action = ask_missing_audio_action(
+                        "Отсутствующие аудиофайлы",
+                        "В загружаемом проекте нет некоторых аудиофайлов, которые есть в обновляемом проекте на сервере. Что сделать с этими файлами на сервере?",
+                        extra_remote_audio,
+                    )
+                    if action == "cancel":
+                        self.statusBar().showMessage("Выгрузка отменена.", 5000)
+                        return
+                    if action == "delete":
+                        for audio_name in extra_remote_audio:
+                            remote_audio_to_delete.append((
+                                audio_name,
+                                remote_existing_audio_paths.get(audio_name) or posixpath.join(tracks_content_dir, audio_name.replace("\\", "/")),
+                            ))
+
                 if not filtered_files:
+                    if remote_audio_to_delete:
+                        for audio_name, remote_path in remote_audio_to_delete:
+                            try:
+                                sftp.remove(remote_path)
+                            except IOError as exc:
+                                raise IOError(f"Не удалось удалить аудиофайл на сервере {audio_name}: {exc}") from exc
+                        QMessageBox.information(self, "Выгрузка на сервер", "Лишние аудиофайлы на сервере удалены.")
+                        self.statusBar().showMessage("Выгрузка завершена: лишние аудиофайлы на сервере удалены.", 7000)
+                        return
                     QMessageBox.information(self, "Выгрузка на сервер", "На сервере уже актуальная версия проекта. Загружать нечего.")
                     self.statusBar().showMessage("Выгрузка не требуется: серверная версия актуальна.", 7000)
                     return
 
                 if replacement_rows:
-                    if not show_replacement_summary(replacement_rows):
+                    skipped_replacements = show_replacement_summary(replacement_rows)
+                    if skipped_replacements is None:
                         self.statusBar().showMessage("Выгрузка отменена.", 5000)
                         return
+                    if skipped_replacements:
+                        skipped_names = set(skipped_replacements)
+                        filtered_files = [
+                            item for item in filtered_files
+                            if item[3] not in skipped_names
+                        ]
+                        if not filtered_files:
+                            if remote_audio_to_delete:
+                                for audio_name, remote_path in remote_audio_to_delete:
+                                    try:
+                                        sftp.remove(remote_path)
+                                    except IOError as exc:
+                                        raise IOError(f"Не удалось удалить аудиофайл на сервере {audio_name}: {exc}") from exc
+                                QMessageBox.information(self, "Выгрузка на сервер", "Лишние аудиофайлы на сервере удалены.")
+                                self.statusBar().showMessage("Выгрузка завершена: лишние аудиофайлы на сервере удалены.", 7000)
+                                return
+                            QMessageBox.information(self, "Выгрузка на сервер", "Файлы для замены не выбраны.")
+                            self.statusBar().showMessage("Выгрузка не выполнена: файлы для замены не выбраны.", 7000)
+                            return
 
                 files_to_upload = filtered_files
 
@@ -6329,6 +6862,13 @@ class PlanEditorMainWindow(QMainWindow):
                     upload_bytes(remote_path, payload, display_name)
                 else:
                     upload_local_file(source, remote_path, display_name)
+
+            if is_direct_ftpradiog_upload:
+                for audio_name, remote_path in remote_audio_to_delete:
+                    try:
+                        sftp.remove(remote_path)
+                    except IOError as exc:
+                        raise IOError(f"Не удалось удалить аудиофайл на сервере {audio_name}: {exc}") from exc
 
             progress_dialog.setValue(100)
             progress_dialog.setLabelText("Выгрузка завершена")
@@ -6372,6 +6912,7 @@ class PlanEditorMainWindow(QMainWindow):
         audio_files_map: dict[str, dict] = {}
         track_entries_map: dict[str, dict] = {}
         anchor_bound_flags = {a.number: bool(a.bound_explicit) for a in self.anchors}
+        anchor_start_flags = {a.number: bool(getattr(a, "start", False)) for a in self.anchors}
         anchor_zone_halls: dict[int, set[int]] = {}
 
         for pz in self.proximity_zones:
@@ -6551,6 +7092,8 @@ class PlanEditorMainWindow(QMainWindow):
                     ae = {"id": a.number, "x": xm, "y": ym, "z": fix_negative_zero(round(a.z / 100, 1))}
                     if anchor_bound_flags.get(a.number, False):
                         ae["bound"] = True
+                    if anchor_start_flags.get(a.number, False):
+                        ae["start"] = True
                     if h.number in anchor_zone_halls.get(a.number, set()):
                         ae["anch_zone"] = True
                     room["anchors"].append(ae)
@@ -6629,6 +7172,8 @@ class PlanEditorMainWindow(QMainWindow):
                 s = f'{{ "id": {a["id"]}, "x": {a["x"]}, "y": {a["y"]}, "z": {a["z"]}'
                 if a.get("bound"):
                     s += ', "bound": true'
+                if a.get("start"):
+                    s += ', "start": true'
                 if a.get("anch_zone"):
                     s += ', "anch_zone": true'
                 s += " }"
